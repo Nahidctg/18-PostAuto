@@ -7,11 +7,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 # ------------------- CONFIGURATION (FIXED) -------------------
 # এই অংশগুলো শুধু একবারই বসাবেন, এগুলো বারবার বদলানোর দরকার নেই
-API_ID = 1234567       # আপনার API ID
-API_HASH = "your_api_hash_here"
-BOT_TOKEN = "your_bot_token_here"
-MONGO_URL = "your_mongodb_connection_string"
-ADMIN_ID = 123456789   # আপনার টেলিগ্রাম আইডি (যে শুধু কন্ট্রোল করবে)
+API_ID = 22697010       # আপনার API ID
+API_HASH = "fd88d7339b0371eb2a9501d523f3e2a7"
+BOT_TOKEN = "8303315439:AAGKPEugn60XGMC7_u4pOaZPnUWkWHvXSNM"
+MONGO_URL = "mongodb+srv://mewayo8672:mewayo8672@cluster0.ozhvczp.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+ADMIN_ID = 8172129114   # আপনার টেলিগ্রাম আইডি (যে শুধু কন্ট্রোল করবে)
 
 # ------------------- DATABASE CONNECTION -------------------
 mongo_client = AsyncIOMotorClient(MONGO_URL)
