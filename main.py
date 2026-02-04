@@ -27,7 +27,7 @@ CACHE = {
     "shortener_key": None,
     "auto_delete": 0,
     "protect_content": False,
-    "post_interval": 1800,
+    "post_interval": 30, # টেস্টিংয়ের জন্য কমিয়ে ৩০ সেকেন্ড করা হলো
     "tutorial_url": "https://t.me/YourTutorialLink"
 }
 
@@ -36,7 +36,6 @@ app = Client("smart_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 # ------------------- HELPER FUNCTIONS -------------------
 
 async def notify_admin(text):
-    """এডমিনকে এরর মেসেজ পাঠানোর ফাংশন"""
     try:
         await app.send_message(ADMIN_ID, text)
     except Exception as e:
@@ -53,16 +52,14 @@ async def load_config():
             "shortener_key": "",
             "auto_delete": 0,
             "protect_content": False,
-            "post_interval": 1800,
+            "post_interval": 30,
             "tutorial_url": "https://youtube.com"
         }
         await config_col.insert_one(default_conf)
         conf = default_conf
     
     CACHE.update(conf)
-    if "post_interval" not in CACHE: CACHE["post_interval"] = 1800
-    if "tutorial_url" not in CACHE: CACHE["tutorial_url"] = "https://youtube.com"
-    print("✅ Config Loaded")
+    print(f"✅ Config Loaded: Source={CACHE['source_channel']}, Public={CACHE['public_channel']}")
 
 async def update_config(key, value):
     await config_col.update_one({"_id": "settings"}, {"$set": {key: value}}, upsert=True)
@@ -82,10 +79,9 @@ async def shorten_link(link):
                 if short_url:
                     return short_url
                 else:
-                    await notify_admin(f"⚠️ **Shortener API Warning:**\nNo URL returned. Using original link.")
                     return link
     except Exception as e:
-        await notify_admin(f"⚠️ **Shortener Error:**\n`{e}`")
+        print(f"Shortener Error: {e}")
         return link
 
 # ------------------- ADMIN COMMANDS -------------------
@@ -94,186 +90,164 @@ async def shorten_link(link):
 async def start_command(client, message):
     if len(message.command) > 1:
         return await send_stored_file(client, message)
-    await message.reply_text("👋 Bot is Ready! Use admin commands to setup.")
+    await message.reply_text("👋 Bot is Ready! Use /setsource and /setpublic to configure.")
 
 @app.on_message(filters.command("setsource") & filters.user(ADMIN_ID))
 async def set_source(client, message):
     try:
         chat_id = int(message.command[1])
-        # চেক করা যে ওই চ্যানেলে এক্সেস আছে কিনা
         try:
             chat = await client.get_chat(chat_id)
             await update_config("source_channel", chat_id)
             await message.reply_text(f"✅ Source Set: `{chat.title}` ({chat_id})")
         except Exception as e:
-            await message.reply_text(f"❌ **Error:** Bot cannot access that channel.\nReason: `{e}`")
+            await message.reply_text(f"❌ Bot cannot access channel. Make bot admin first.\nError: {e}")
     except: await message.reply_text("❌ Use: `/setsource -100xxxx`")
 
 @app.on_message(filters.command("setpublic") & filters.user(ADMIN_ID))
 async def set_public(client, message):
     try:
         chat_id = int(message.command[1])
-        # চেক করা যে ওই চ্যানেলে এক্সেস আছে কিনা
         try:
             chat = await client.get_chat(chat_id)
             await update_config("public_channel", chat_id)
             await message.reply_text(f"✅ Public Set: `{chat.title}` ({chat_id})")
         except Exception as e:
-            await message.reply_text(f"❌ **Error:** Bot cannot access that channel.\nReason: `{e}`")
+            await message.reply_text(f"❌ Bot cannot access channel. Make bot admin first.\nError: {e}")
     except: await message.reply_text("❌ Use: `/setpublic -100xxxx`")
-
-@app.on_message(filters.command("setinterval") & filters.user(ADMIN_ID))
-async def set_post_interval(client, message):
-    try:
-        seconds = int(message.command[1])
-        await update_config("post_interval", seconds)
-        await message.reply_text(f"🚀 Interval: {seconds}s")
-    except: await message.reply_text("❌ Error.")
-
-@app.on_message(filters.command("setshortener") & filters.user(ADMIN_ID))
-async def set_shortener(client, message):
-    try:
-        _, url, key = message.text.split(" ")
-        await update_config("shortener_api", url)
-        await update_config("shortener_key", key)
-        await message.reply_text("✅ Shortener Updated!")
-    except: await message.reply_text("❌ Use: `/setshortener URL KEY`")
-
-@app.on_message(filters.command("autodelete") & filters.user(ADMIN_ID))
-async def set_autodelete(client, message):
-    try:
-        seconds = int(message.command[1])
-        await update_config("auto_delete", seconds)
-        await message.reply_text(f"✅ Auto Delete: {seconds}s")
-    except: await message.reply_text("❌ Error.")
 
 @app.on_message(filters.command("status") & filters.user(ADMIN_ID))
 async def status(client, message):
     q_len = await queue_col.count_documents({})
-    interval = CACHE.get("post_interval", 1800)
     await message.reply_text(
-        f"📊 **DEBUG STATUS**\n"
+        f"📊 **STATUS**\n"
         f"📥 Source: `{CACHE['source_channel']}`\n"
         f"📢 Public: `{CACHE['public_channel']}`\n"
-        f"⏳ Pending: `{q_len}`\n"
-        f"⏱ Interval: {interval}s"
+        f"⏳ Queue Size: `{q_len}`\n"
     )
 
-# ------------------- LOGIC -------------------
+# ------------------- LOGIC (FIXED) -------------------
 
-@app.on_message(filters.channel & filters.video)
+# Fix: Added filters.document along with filters.video
+@app.on_message(filters.channel & (filters.video | filters.document))
 async def incoming_video(client, message):
+    # Debug print
+    print(f"📩 New Message in {message.chat.id}. Expected Source: {CACHE['source_channel']}")
+    
     if CACHE["source_channel"] and message.chat.id == int(CACHE["source_channel"]):
-        video_data = {
-            "msg_id": message.id,
-            "caption": message.caption or "New Video",
-            "file_id": message.video.file_id,
-            "date": message.date
-        }
-        await queue_col.insert_one(video_data)
+        # Check if document is actually a video
+        file_id = None
+        if message.video:
+            file_id = message.video.file_id
+        elif message.document and message.document.mime_type.startswith("video"):
+            file_id = message.document.file_id
+        
+        if file_id:
+            video_data = {
+                "msg_id": message.id,
+                "caption": message.caption or "New Video",
+                "file_id": file_id,
+                "date": message.date
+            }
+            await queue_col.insert_one(video_data)
+            print(f"✅ Video Added to Queue: {message.id}")
+        else:
+            print("❌ Ignored: Not a video file.")
 
 async def send_stored_file(client, message):
     try:
+        msg_id = int(message.command[1])
         if not CACHE["source_channel"]:
             return await message.reply_text("❌ Source Channel not set!")
 
-        msg_id = int(message.command[1])
+        # Fetch message directly using ID
         file_msg = await client.get_messages(int(CACHE["source_channel"]), msg_id)
         
-        if not file_msg or not file_msg.video:
-            return await message.reply_text("❌ File deleted from source.")
+        if not file_msg or (not file_msg.video and not file_msg.document):
+            return await message.reply_text("❌ File deleted or not found.")
 
+        caption = f"🎥 **{file_msg.caption[:50] if file_msg.caption else 'Video'}...**"
+        
         sent = await file_msg.copy(
             chat_id=message.chat.id,
-            caption=f"🎥 **{file_msg.caption[:50]}...**",
+            caption=caption,
             protect_content=CACHE["protect_content"]
         )
 
         if CACHE["auto_delete"] > 0:
-            await message.reply_text(f"⏳ Deleting in {CACHE['auto_delete']}s...")
             await asyncio.sleep(CACHE["auto_delete"])
             await sent.delete()
     except Exception as e:
         print(f"Delivery Error: {e}")
 
-# ------------------- DEBUGGING SCHEDULER -------------------
+# ------------------- SCHEDULER -------------------
 
 async def post_scheduler():
     print("🔄 Scheduler Started...")
-    # এডমিনকে জানানো যে শিডিউলার চালু হয়েছে
-    await notify_admin("✅ **Bot Started!** Scheduler is running.\nWaiting for videos...")
-
     while True:
-        interval = CACHE.get("post_interval", 1800)
+        interval = CACHE.get("post_interval", 30)
         
         try:
             if not CACHE["source_channel"] or not CACHE["public_channel"]:
-                await asyncio.sleep(10)
+                print("⚠️ Channels not configured yet. Waiting...")
+                await asyncio.sleep(20)
                 continue
 
+            # Check Queue
             video_data = await queue_col.find_one(sort=[("date", 1)])
             
             if video_data:
                 msg_id = video_data["msg_id"]
+                print(f"🚀 Processing Video ID: {msg_id}")
                 
-                # ১. সোর্স চেক করা
                 try:
                     real_msg = await app.get_messages(int(CACHE["source_channel"]), msg_id)
-                    if not real_msg or not real_msg.video:
-                        await notify_admin(f"⚠️ **Skipped Video:** `{msg_id}`\nReason: Not found in Source Channel.")
+                    
+                    if not real_msg:
+                        print("❌ Message not found in source, deleting from queue.")
                         await queue_col.delete_one({"_id": video_data["_id"]})
                         continue
-                except Exception as e:
-                    await notify_admin(f"🚨 **Source Error:**\nCannot access Source Channel!\nReason: `{e}`")
-                    await asyncio.sleep(60) # ১ মিনিট ব্রেক
-                    continue
 
-                # ২. পোস্ট প্রিপারেশন
-                thumb_path = await app.download_media(real_msg.thumbs[0].file_id) if real_msg.thumbs else None
-                bot_usr = (await app.get_me()).username
-                start_link = f"https://t.me/{bot_usr}?start={msg_id}"
-                final_link = await shorten_link(start_link)
+                    # Thumbnail Logic
+                    thumb_path = None
+                    if real_msg.thumbs:
+                        thumb_path = await app.download_media(real_msg.thumbs[0].file_id)
+                    elif real_msg.video and real_msg.video.thumbs:
+                         thumb_path = await app.download_media(real_msg.video.thumbs[0].file_id)
 
-                # ৩. পাবলিক চ্যানেলে পোস্ট করার চেষ্টা
-                dest_id = int(CACHE["public_channel"])
-                caption = (
-                    f"🎬 **{video_data['caption'][:200]}**\n\n"
-                    f"🔗 **Download:** {final_link}"
-                )
-                buttons = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📥 Download Video", url=final_link)],
-                    [InlineKeyboardButton("❓ How to Download", url=CACHE["tutorial_url"])]
-                ])
+                    bot_usr = (await app.get_me()).username
+                    start_link = f"https://t.me/{bot_usr}?start={msg_id}"
+                    final_link = await shorten_link(start_link)
 
-                try:
+                    dest_id = int(CACHE["public_channel"])
+                    caption_text = video_data.get('caption', 'Video')
+                    if caption_text is None: caption_text = "Video"
+                    
+                    caption = (
+                        f"🎬 **{caption_text[:100]}**\n\n"
+                        f"🔗 **Download:** {final_link}"
+                    )
+                    
+                    buttons = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📥 Download Video", url=final_link)]
+                    ])
+
+                    # Posting
                     if thumb_path:
                         await app.send_photo(dest_id, photo=thumb_path, caption=caption, reply_markup=buttons)
                         os.remove(thumb_path)
                     else:
                         await app.send_message(dest_id, text=caption, reply_markup=buttons)
                     
-                    # সফল হলে
+                    print(f"✅ Posted Successfully: {msg_id}")
                     await queue_col.delete_one({"_id": video_data["_id"]})
-                    # await notify_admin(f"✅ **Posted:** `{msg_id}`") # এটা চাইলে কমেন্ট আউট করতে পারেন
-
-                except ChatWriteForbidden:
-                    await notify_admin(f"❌ **POST FAILED!**\nReason: I am not Admin in Public Channel ({dest_id}).\nPlease give me 'Post Messages' permission.")
-                    # এই ভিডিওটা ডিলিট করব না, যতক্ষণ না ঠিক হয়
-                    await asyncio.sleep(60)
-                    continue
-                
-                except ChatAdminRequired:
-                    await notify_admin(f"❌ **POST FAILED!**\nReason: Admin rights required in Public Channel.")
-                    await asyncio.sleep(60)
-                    continue
 
                 except Exception as e:
-                    await notify_admin(f"❌ **UNKNOWN ERROR:**\nVideo ID: `{msg_id}`\nReason: `{e}`")
-                    # অজানা কারণে লুপে না পড়ার জন্য ডিলিট করে দিচ্ছি
+                    print(f"❌ Post Failed: {e}")
+                    # Error হলে আপাতত Queue থেকে মুছে ফেলছি যাতে লুপ না হয়
                     await queue_col.delete_one({"_id": video_data["_id"]})
-
             else:
-                pass
+                print("💤 Queue Empty...")
 
         except Exception as e:
             print(f"Critical Scheduler Error: {e}")
@@ -285,7 +259,14 @@ async def post_scheduler():
 async def main():
     await app.start()
     await load_config()
-    print("Bot Started")
+    print("🤖 BOT STARTED SUCCESSFULLY")
+    
+    # Check if channels are set
+    if not CACHE["source_channel"]:
+        print("⚠️ WARNING: Source Channel NOT set! Run /setsource")
+    if not CACHE["public_channel"]:
+        print("⚠️ WARNING: Public Channel NOT set! Run /setpublic")
+
     asyncio.create_task(post_scheduler())
     await idle()
     await app.stop()
