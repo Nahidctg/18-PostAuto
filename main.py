@@ -73,7 +73,7 @@ app = Client(
 
 async def web_server_handler(request):
     """সিম্পল ওয়েব পেজ রেসপন্স"""
-    return web.Response(text="✅ Bot is Running in Ultimate Mode with Collage Support!")
+    return web.Response(text="✅ Bot is Running in Ultimate Mode with Vertical Collage Support!")
 
 async def start_web_server():
     """aiohttp ওয়েব সার্ভার রানার"""
@@ -172,13 +172,13 @@ async def shorten_url_api(long_url):
     return long_url
 
 # ====================================================================
-#                ৪. থাম্বনেইল জেনারেটর (Updated Logic)
+#                ৪. থাম্বনেইল জেনারেটর (Updated Logic: Vertical)
 # ====================================================================
 
 def generate_collage_thumbnail(video_path, message_id):
     """
     ভিডিও থেকে ৪টি ফ্রেম নিয়ে কোলাজ তৈরি করবে।
-    ভিডিও ছোট হলেও (১ মিনিটের কম) এটি কাজ করবে।
+    ফিক্স: ফ্রেমগুলো এখন চ্যাপ্টা হবে না, লম্বালম্বি (360x640) করে ক্রপ করা হবে।
     """
     thumbnail_path = f"downloads/thumb_{message_id}.jpg"
     
@@ -197,8 +197,10 @@ def generate_collage_thumbnail(video_path, message_id):
             
         frames = []
         # ৪টি পয়েন্ট থেকে ফ্রেম নিবে (২০%, ৪০%, ৬০%, ৮০%)
-        # ছোট ভিডিও হলেও এই লজিক কাজ করবে
         percentages = [0.20, 0.40, 0.60, 0.80]
+        
+        # --- [FIX]: টার্গেট সাইজ এখন লম্বালম্বি (Portrait) ---
+        TARGET_W, TARGET_H = 360, 640 # 9:16 Ratio
         
         for p in percentages:
             target_frame = int(total_frames * p)
@@ -206,9 +208,29 @@ def generate_collage_thumbnail(video_path, message_id):
             success, img = cap.read()
             
             if success:
-                # ইমেজ রিসাইজ (সবগুলো একই সাইজ হওয়া জরুরি কোলাজের জন্য)
-                # 640x360 পিক্সেল (Standard 16:9)
-                resized = cv2.resize(img, (640, 360))
+                # --- [Smart Crop Logic] ---
+                # ইমেজ চ্যাপ্টা না করে মাঝখান থেকে কেটে রিসাইজ করা হবে
+                h, w, _ = img.shape
+                
+                # আমরা চাই ৯:১৬ রেশিও
+                target_ratio = TARGET_W / TARGET_H
+                current_ratio = w / h
+                
+                crop_w, crop_h = w, h
+                
+                if current_ratio > target_ratio:
+                    # ভিডিও যদি বেশি চওড়া হয়, দুই পাশ থেকে কাটব
+                    crop_w = int(h * target_ratio)
+                    start_x = (w - crop_w) // 2
+                    img = img[:, start_x:start_x+crop_w] # Center Crop width
+                else:
+                    # ভিডিও যদি বেশি লম্বা হয়, উপর-নিচ থেকে কাটব
+                    crop_h = int(w / target_ratio)
+                    start_y = (h - crop_h) // 2
+                    img = img[start_y:start_y+crop_h, :] # Center Crop height
+                
+                # এখন রিসাইজ করলে আর চ্যাপ্টা হবে না
+                resized = cv2.resize(img, (TARGET_W, TARGET_H), interpolation=cv2.INTER_AREA)
                 frames.append(resized)
             else:
                 # ফ্রেম রিড করতে না পারলে লুপ ব্রেক
