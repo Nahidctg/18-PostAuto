@@ -44,7 +44,7 @@ queue_collection = db["video_queue"]    # ভিডিও কিউ লিস্
 config_collection = db["bot_settings"]  # সেটিংস সেভ রাখার জন্য
 users_collection = db["users_list"]     # ব্রডকাস্টের জন্য ইউজার লিস্ট
 
-# গ্লোবাল কনফিগ ভেরিয়েবল (ডিফল্ট ভ্যালু)
+# গলোবাল কনফিগ ভেরিয়েবল (ডিফল্ট ভ্যালু)
 SYSTEM_CONFIG = {
     "source_channel": None,
     "public_channel": None,
@@ -536,9 +536,10 @@ async def processing_engine():
                     logger.info("⬇️ Downloading video for thumbnail generation...")
                     await app.download_media(source_msg, file_name=video_path)
                     
-                    # ৪. কোলাজ থাম্বনেইল তৈরি (Collage)
+                    # ৪. কোলাজ থাম্বনেইল তৈরি (অ্যাসিংক্রোনাসলি চালানো যাতে হ্যাং না করে)
                     logger.info("🎨 Generating Collage Thumbnail...")
-                    thumb_path = generate_collage_thumbnail(video_path, msg_id)
+                    # Update: asyncio.to_thread ব্যবহার করা হয়েছে যাতে মেইন লুপ ব্লক না হয়
+                    thumb_path = await asyncio.to_thread(generate_collage_thumbnail, video_path, msg_id)
                     
                     # ৫. ডিপ লিংক তৈরি
                     bot_username = (await app.get_me()).username
