@@ -6,6 +6,7 @@ import logging
 import aiohttp
 import cv2  # ভিডিও প্রসেসিং এর জন্য
 import numpy as np  # কোলাজ থাম্বনেইল বানানোর জন্য
+import gc  # মেমোরি ক্লিয়ার করার জন্য
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, 
@@ -44,7 +45,7 @@ queue_collection = db["video_queue"]    # ভিডিও কিউ লিস্
 config_collection = db["bot_settings"]  # সেটিংস সেভ রাখার জন্য
 users_collection = db["users_list"]     # ব্রডকাস্টের জন্য ইউজার লিস্ট
 
-# গ্লোবাল কনফিগ ভেরিয়েবল (ডিফল্ট ভ্যালু)
+# গ্লোবাল কনফিগ ও সুন্দর ক্যাপশন টেম্পলেট (Updated)
 SYSTEM_CONFIG = {
     "source_channel": None,
     "public_channel": None,
@@ -56,7 +57,7 @@ SYSTEM_CONFIG = {
     "protect_content": False,     # কপি প্রটেকশন
     "tutorial_link": None,        # টিউটোরিয়াল ভিডিওর লিংক
     "force_sub": True,            # ফোর্স সাবস্ক্রাইব অন/অফ
-    "caption_template": "🎬 **{caption}**\n\n✨ **Quality:** HD 720p\n🔥 **Exclusive Content**"
+    "caption_template": "🔥 **NEW VIRAL VIDEO** 🔥\n\n🎬 **Title:** `{caption}`\n\n✨ **Quality:** FULL HD 1080p\n🚀 **Fastest Download Link**\n\n📢 *Join our channel for more exclusive content!*"
 }
 
 # পাইরোগ্রাম ক্লায়েন্ট সেটআপ (Workers বাড়িয়ে ১০০ করা হয়েছে যাতে হ্যাং না করে)
@@ -237,6 +238,12 @@ def generate_collage_thumbnail(video_path, message_id):
 
         # ফাইনাল ইমেজ সেভ করা (High Quality)
         cv2.imwrite(thumbnail_path, collage, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        
+        # মেমোরি ক্লিয়ার
+        del frames
+        del collage
+        gc.collect()
+        
         return thumbnail_path
 
     except Exception as e:
@@ -473,13 +480,16 @@ async def process_user_delivery(client, message):
                     await m1.delete()
                     await m2.delete()
                 except: pass
-                
+            
+            # মেমোরি ক্লিয়ার্যান্সের জন্য
             asyncio.create_task(delete_after_delay(sent_msg, warning, SYSTEM_CONFIG["auto_delete_time"]))
             
     except Exception as e:
         logger.error(f"Delivery Error: {e}")
         try: await message.reply("❌ An error occurred. Please contact admin.")
         except: pass
+    finally:
+        gc.collect() # প্রতি ডেলিভারির পর মেমোরি ক্লিয়ার
 
 # ====================================================================
 #                       ৭. সোর্স চ্যানেল মনিটরিং
@@ -555,7 +565,7 @@ async def processing_engine():
                     deep_link = f"https://t.me/{bot_username}?start={msg_id}"
                     final_link = await shorten_url_api(deep_link)
                     
-                    # ৬. ক্যাপশন রেডি করা
+                    # ৬. ক্যাপশন রেডি করা (Beautiful Viral Template)
                     raw_caption = task.get("caption", "New Video")[:100]
                     final_caption = SYSTEM_CONFIG["caption_template"].format(caption=raw_caption)
                     
@@ -605,6 +615,9 @@ async def processing_engine():
                     if os.path.exists(video_path): os.remove(video_path)
                     if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
                 except: pass
+                
+                # মেমোরি ক্লিয়ার
+                gc.collect()
             
             # ১০. পোস্ট ইন্টারভাল (বিরতি)
             wait_time = SYSTEM_CONFIG.get("post_interval", 30)
