@@ -44,7 +44,7 @@ queue_collection = db["video_queue"]    # ভিডিও কিউ লিস্
 config_collection = db["bot_settings"]  # সেটিংস সেভ রাখার জন্য
 users_collection = db["users_list"]     # ব্রডকাস্টের জন্য ইউজার লিস্ট
 
-# গলোবাল কনফিগ ভেরিয়েবল (ডিফল্ট ভ্যালু)
+# গ্লোবাল কনফিগ ভেরিয়েবল (ডিফল্ট ভ্যালু)
 SYSTEM_CONFIG = {
     "source_channel": None,
     "public_channel": None,
@@ -59,12 +59,13 @@ SYSTEM_CONFIG = {
     "caption_template": "🎬 **{caption}**\n\n✨ **Quality:** HD 720p\n🔥 **Exclusive Content**"
 }
 
-# পাইরোগ্রাম ক্লায়েন্ট সেটআপ
+# পাইরোগ্রাম ক্লায়েন্ট সেটআপ (Workers বাড়িয়ে ১০০ করা হয়েছে যাতে হ্যাং না করে)
 app = Client(
     "Enterprise_Session_Max",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    workers=100
 )
 
 # ====================================================================
@@ -274,7 +275,9 @@ async def start_command_handler(client, message):
 
     # ৩. যদি ভিডিও রিকোয়েস্ট হয় (start id)
     if len(message.command) > 1:
-        return await process_user_delivery(client, message)
+        # এটি ব্যাকগ্রাউন্ডে পাঠানো হলো যাতে বট ফ্রি থাকে
+        asyncio.create_task(process_user_delivery(client, message))
+        return
     
     # ৪. অ্যাডমিন প্যানেল (শুধুমাত্র অ্যাডমিনের জন্য)
     if message.from_user.id == ADMIN_ID:
@@ -460,16 +463,23 @@ async def process_user_delivery(client, message):
         
         await status_msg.delete()
         
-        # অটো ডিলিট
+        # অটো ডিলিট লজিক (হ্যাং না হওয়ার জন্য ব্যাকগ্রাউন্ডে চালানো হয়েছে)
         if SYSTEM_CONFIG["auto_delete_time"] > 0:
             warning = await message.reply(f"⏳ **This video will be auto-deleted in {SYSTEM_CONFIG['auto_delete_time']} seconds!**")
-            await asyncio.sleep(SYSTEM_CONFIG["auto_delete_time"])
-            await sent_msg.delete()
-            await warning.delete()
+            
+            async def delete_after_delay(m1, m2, delay):
+                await asyncio.sleep(delay)
+                try:
+                    await m1.delete()
+                    await m2.delete()
+                except: pass
+                
+            asyncio.create_task(delete_after_delay(sent_msg, warning, SYSTEM_CONFIG["auto_delete_time"]))
             
     except Exception as e:
         logger.error(f"Delivery Error: {e}")
-        await message.reply("❌ An error occurred. Please contact admin.")
+        try: await message.reply("❌ An error occurred. Please contact admin.")
+        except: pass
 
 # ====================================================================
 #                       ৭. সোর্স চ্যানেল মনিটরিং
@@ -536,9 +546,8 @@ async def processing_engine():
                     logger.info("⬇️ Downloading video for thumbnail generation...")
                     await app.download_media(source_msg, file_name=video_path)
                     
-                    # ৪. কোলাজ থাম্বনেইল তৈরি (অ্যাসিংক্রোনাসলি চালানো যাতে হ্যাং না করে)
+                    # ৪. কোলাজ থাম্বনেইল তৈরি (Update: asyncio.to_thread ব্যবহার করা হয়েছে যাতে ব্লক না হয়)
                     logger.info("🎨 Generating Collage Thumbnail...")
-                    # Update: asyncio.to_thread ব্যবহার করা হয়েছে যাতে মেইন লুপ ব্লক না হয়
                     thumb_path = await asyncio.to_thread(generate_collage_thumbnail, video_path, msg_id)
                     
                     # ৫. ডিপ লিংক তৈরি
