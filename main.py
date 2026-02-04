@@ -2,43 +2,41 @@ import asyncio
 import os
 import shutil
 import subprocess
-import time
 import aiohttp
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+)
 from pyrogram.errors import FloodWait, ChatWriteForbidden
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# ------------------- ১. কনফিগারেশন (বট সেটআপ) -------------------
+# ------------------- ১. কনফিগারেশন -------------------
 API_ID = 22697010
 API_HASH = "fd88d7339b0371eb2a9501d523f3e2a7"
 BOT_TOKEN = "8303315439:AAGKPEugn60XGMC7_u4pOaZPnUWkWHvXSNM"
 MONGO_URL = "mongodb+srv://mewayo8672:mewayo8672@cluster0.ozhvczp.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 ADMIN_ID = 8172129114
 
-# ডাটাবেস কানেকশন
 mongo_client = AsyncIOMotorClient(MONGO_URL)
-db = mongo_client["AutoPostBot_Pro"]
+db = mongo_client["AutoPostBot_Viral"]
 queue_col = db["queue"]
 config_col = db["config"]
 
-# ক্যাশ মেমোরি (বারবার ডাটাবেস কল কমানোর জন্য)
 CACHE = {
     "source_channel": None,
     "public_channel": None,
     "shortener_api": None,
     "shortener_key": None,
     "auto_delete": 0,
-    "post_interval": 60, # বড় ভিডিও প্রসেস করতে সময় লাগে, তাই ৬০ সেকেন্ড
+    "post_interval": 60,
     "tutorial_url": "https://t.me/YourChannel"
 }
 
-app = Client("viral_poster_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("viral_bot_pro", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ------------------- ২. হেল্পার ফাংশন -------------------
 
 async def load_config():
-    """সেটিংস লোড করে"""
     conf = await config_col.find_one({"_id": "settings"})
     if not conf:
         default = {
@@ -52,298 +50,217 @@ async def load_config():
         await config_col.insert_one(default)
         conf = default
     CACHE.update(conf)
-    print("✅ System Config Loaded Successfully!")
+    print("✅ Config Loaded")
 
 async def update_config(key, value):
     await config_col.update_one({"_id": "settings"}, {"$set": {key: value}}, upsert=True)
     CACHE[key] = value
 
 async def shorten_link(link):
-    """লিংক শর্টেনার এপিআই হ্যান্ডলার"""
-    if not CACHE.get("shortener_api") or not CACHE.get("shortener_key"):
-        return link
+    if not CACHE.get("shortener_api") or not CACHE.get("shortener_key"): return link
     try:
         url = f"{CACHE['shortener_api']}?api={CACHE['shortener_key']}&url={link}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 data = await resp.json()
                 return data.get("shortenedUrl") or data.get("url") or link
-    except:
-        return link
+    except: return link
 
-# ------------------- ৩. থাম্বনেইল জেনারেটর (১০০% কাজ করবে) -------------------
+# ------------------- ৩. ভাইরাল থাম্বনেইল জেনারেটর -------------------
 
-async def generate_thumbnail(video_path):
+async def generate_screenshots(video_path):
     """
-    ভিডিওর ১৫ সেকেন্ডের মাথা থেকে HD থাম্বনেইল বের করবে।
+    ভিডিও থেকে ৩টি স্ক্রিনশট নিবে (শুরু, মাঝ, শেষ)
     """
-    thumb_path = f"{video_path}.jpg"
-    
-    # চেক করা হচ্ছে সিস্টেমে FFmpeg আছে কিনা
     if not shutil.which("ffmpeg"):
-        print("❌ Critical Error: FFmpeg not installed!")
-        return None
+        return []
 
-    try:
-        # ভিডিওর ডিউরেশন চেক করার দরকার নেই, সরাসরি ১৫ সেকেন্ডে ট্রাই করবে
-        # যদি ভিডিও ছোট হয়, FFmpeg অটোমেটিক মানিয়ে নিবে
-        cmd = [
-            "ffmpeg", 
-            "-i", video_path, 
-            "-ss", "00:00:10", # ১৫ সেকেন্ডের সিন (বেশিরভাগ ভাইরাল সিন মাঝখানে থাকে)
-            "-vframes", "1", 
-            "-q:v", "2", # হাই কোয়ালিটি
-            thumb_path, 
-            "-y"
-        ]
-        
-        # কমান্ড রান করা
-        subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        if os.path.exists(thumb_path):
-            print("✅ Thumbnail Generated Successfully")
-            return thumb_path
-        else:
-            print("⚠️ FFmpeg failed to generate thumb. Trying fallback...")
-            return None
-    except Exception as e:
-        print(f"❌ Thumb Gen Error: {e}")
-        return None
+    thumbs = []
+    # ৩টি ভিন্ন টাইমফ্রেম (ভিডিওর ৫ সেকেন্ড, ১৫ সেকেন্ড, ২৫ সেকেন্ড)
+    # আপনার ভিডিও ছোট হলে এটি প্রথম ফ্রেমগুলোই নিবে
+    timestamps = ["00:00:05", "00:00:15", "00:00:30"]
+    
+    for i, time in enumerate(timestamps):
+        out_file = f"{video_path}_thumb_{i}.jpg"
+        try:
+            subprocess.call([
+                "ffmpeg", "-ss", time, "-i", video_path,
+                "-vframes", "1", "-q:v", "2", out_file, "-y"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            if os.path.exists(out_file):
+                thumbs.append(out_file)
+        except: pass
+    
+    return thumbs
 
-# ------------------- ৪. ইউজার কমান্ড (Start Button Fix) -------------------
+# ------------------- ৪. কমান্ডস (Start & Admin) -------------------
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
-    # যদি লিংকে ক্লিক করে আসে (যেমন: /start 12345)
     if len(message.command) > 1:
         return await send_video_to_user(client, message)
-    
-    await message.reply_text(
-        "👋 **Welcome Boss!**\n\n"
-        "I am fully operational now. Configure me using:\n"
-        "`/setsource ID`\n`/setpublic ID`\n`/status`"
-    )
+    await message.reply_text("👋 **Viral Bot is Ready!**\nUse /setsource & /setpublic to setup.")
 
 async def send_video_to_user(client, message):
     try:
         msg_id = int(message.command[1])
-        if not CACHE["source_channel"]:
-            return await message.reply_text("❌ Admin hasn't set the Source Channel yet.")
-
-        # মেইন ভিডিও সোর্স থেকে আনা
+        if not CACHE["source_channel"]: return await message.reply("❌ Channel not set")
+        
         file_msg = await client.get_messages(int(CACHE["source_channel"]), msg_id)
-        
-        if not file_msg or (not file_msg.video and not file_msg.document):
-            return await message.reply_text("❌ This video has been deleted.")
+        if not file_msg: return await message.reply("❌ Video Deleted")
 
-        caption = f"✅ **Here is your video!**\n\n🆔 ID: `{msg_id}`"
-        
-        sent = await file_msg.copy(
-            chat_id=message.chat.id,
-            caption=caption,
-            protect_content=CACHE["protect_content"]
-        )
+        caption = f"✅ **Here is your video!**\n🆔 ID: `{msg_id}`"
+        sent = await file_msg.copy(message.chat.id, caption=caption, protect_content=True)
 
-        # অটো ডিলিট লজিক
         if CACHE["auto_delete"] > 0:
-            await message.reply_text(f"⏳ **This video will disappear in {CACHE['auto_delete']} seconds!**")
+            await message.reply(f"⏳ Deleting in {CACHE['auto_delete']}s...")
             await asyncio.sleep(CACHE["auto_delete"])
             await sent.delete()
-            
     except Exception as e:
-        print(f"Delivery Error: {e}")
-        await message.reply_text("❌ Error fetching video.")
+        await message.reply(f"❌ Error: {e}")
 
-# ------------------- ৫. অ্যাডমিন কমান্ডস -------------------
-
+# Admin Commands
 @app.on_message(filters.command("setsource") & filters.user(ADMIN_ID))
-async def set_source(c, m):
+async def set_s(c, m): 
     try:
-        cid = int(m.command[1])
-        await update_config("source_channel", cid)
-        await m.reply(f"✅ Source Channel: `{cid}`")
-    except: await m.reply("❌ Use: `/setsource -100xxxx`")
+        await update_config("source_channel", int(m.command[1]))
+        await m.reply("✅ Source Set")
+    except: await m.reply("Error")
 
 @app.on_message(filters.command("setpublic") & filters.user(ADMIN_ID))
-async def set_public(c, m):
+async def set_p(c, m):
     try:
-        cid = int(m.command[1])
-        await update_config("public_channel", cid)
-        await m.reply(f"✅ Public Channel: `{cid}`")
-    except: await m.reply("❌ Use: `/setpublic -100xxxx`")
+        await update_config("public_channel", int(m.command[1]))
+        await m.reply("✅ Public Set")
+    except: await m.reply("Error")
 
 @app.on_message(filters.command("status") & filters.user(ADMIN_ID))
-async def status(c, m):
+async def stat(c, m):
     q = await queue_col.count_documents({})
-    ff = "✅ Ready" if shutil.which("ffmpeg") else "❌ Missing"
-    await m.reply(
-        f"📊 **SYSTEM STATUS**\n"
-        f"🎥 Queue Pending: `{q}`\n"
-        f"🔧 FFmpeg: `{ff}`\n"
-        f"📥 Source: `{CACHE['source_channel']}`\n"
-        f"📢 Public: `{CACHE['public_channel']}`"
-    )
+    await m.reply(f"📊 Queue: {q}\nConfig: Source={CACHE['source_channel']}")
 
 @app.on_message(filters.command("clearqueue") & filters.user(ADMIN_ID))
-async def clear(c, m):
+async def clr(c, m):
     await queue_col.delete_many({})
-    await m.reply("🗑️ Queue Cleared!")
+    await m.reply("🗑 Cleared")
 
-# ------------------- ৬. ভিডিও রিসিভ লজিক -------------------
+# ------------------- ৫. রিসিভার -------------------
 
 @app.on_message(filters.channel & (filters.video | filters.document))
-async def receiver(c, m):
-    # শুধুমাত্র সোর্স চ্যানেলের ভিডিও নিবে
+async def incoming(c, m):
     if CACHE["source_channel"] and m.chat.id == int(CACHE["source_channel"]):
-        f_id = None
-        # ভিডিও বা ফাইল ডিটেকশন
-        if m.video: f_id = m.video.file_id
-        elif m.document and m.document.mime_type and "video" in m.document.mime_type:
-            f_id = m.document.file_id
-        
+        f_id = m.video.file_id if m.video else (m.document.file_id if m.document else None)
         if f_id:
             await queue_col.insert_one({
                 "msg_id": m.id,
-                "caption": m.caption or "New Viral Video 🔥",
-                "file_id": f_id,
+                "caption": m.caption or "Viral Video",
                 "date": m.date
             })
-            print(f"📥 New Video Added to Queue: ID {m.id}")
+            print(f"➕ Added: {m.id}")
 
-# ------------------- ৭. মেইন প্রসেসিং লুপ (The Brain) -------------------
+# ------------------- ৬. মেইন শিডিউলার (Viral Logic) -------------------
 
 async def post_scheduler():
-    print("🔄 Bot Scheduler Started. Waiting for videos...")
-    
+    print("🔄 Scheduler Started...")
     while True:
         try:
-            # কনফিগ চেক
             if not CACHE["source_channel"] or not CACHE["public_channel"]:
-                await asyncio.sleep(20)
-                continue
+                await asyncio.sleep(10); continue
 
-            # ১. কিউ থেকে ভিডিও বের করা (সবচেয়ে পুরনোটা আগে)
-            video_data = await queue_col.find_one(sort=[("date", 1)])
-            
-            if video_data:
-                msg_id = video_data["msg_id"]
-                print(f"🚀 Processing Video ID: {msg_id}")
+            data = await queue_col.find_one(sort=[("date", 1)])
+            if data:
+                msg_id = data["msg_id"]
+                print(f"🚀 Processing: {msg_id}")
 
                 real_msg = None
                 try:
                     real_msg = await app.get_messages(int(CACHE["source_channel"]), msg_id)
-                except Exception as e:
-                    print(f"❌ Source Fetch Error: {e}")
-                    # মেসেজ না পেলে কিউ থেকে ডিলিট
-                    await queue_col.delete_one({"_id": video_data["_id"]})
-                    continue
+                except: pass
 
                 if not real_msg:
-                    await queue_col.delete_one({"_id": video_data["_id"]})
-                    continue
+                    await queue_col.delete_one({"_id": data["_id"]}); continue
 
-                # ২. ভিডিও ডাউনলোড ও থাম্বনেইল জেনারেশন
+                # ভিডিও ডাউনলোড এবং স্ক্রিনশট নেওয়া
                 video_path = None
-                thumb_path = None
-
+                thumbs = []
                 try:
-                    print("⬇️ Downloading Video (Processing)...")
+                    print("⬇️ Downloading Video...")
                     video_path = await app.download_media(real_msg, file_name=f"v_{msg_id}.mp4")
-                    
                     if video_path:
-                        print("🎨 Generating Attractive Thumbnail...")
-                        thumb_path = await generate_thumbnail(video_path)
+                        print("🎨 Generating Screenshots...")
+                        thumbs = await generate_screenshots(video_path)
                 except Exception as e:
-                    print(f"⚠️ Download/Gen Error: {e}")
+                    print(f"Download Error: {e}")
 
-                # ৩. যদি কাস্টম থাম্বনেইল ফেইল করে, ডিফল্টটা ব্যবহার করো
-                if not thumb_path and real_msg.thumbs:
-                    try:
-                        print("⚠️ Using Telegram Thumbnail as Fallback")
-                        thumb_path = await app.download_media(real_msg.thumbs[0].file_id)
-                    except: pass
-
-                # ৪. লিংক ও ক্যাপশন সাজানো (Viral Template)
+                # লিংক ও ক্যাপশন
                 bot_usr = (await app.get_me()).username
-                start_link = f"https://t.me/{bot_usr}?start={msg_id}"
-                final_link = await shorten_link(start_link)
+                link = await shorten_link(f"https://t.me/{bot_usr}?start={msg_id}")
                 
-                # সুন্দর ক্যাপশন টেমপ্লেট
-                original_cap = video_data.get('caption', 'Hot Video')
-                if not original_cap: original_cap = "New Video"
-                
+                caption_text = data.get('caption', 'Video')
                 pretty_caption = (
-                    f"🔥 **NEW VIRAL VIDEO UPLOADED!**\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎬 **Title:** {original_cap[:100]}\n"
-                    f"✨ **Quality:** HD (Original)\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"👇 **Click Below to Watch Full Video** 👇\n"
-                    f"🔗 **Link:** {final_link}"
+                    f"🔥 **{caption_text[:100]}**\n\n"
+                    f"✨ **Quality:** HD Streaming\n"
+                    f"🔗 **Download Link:** {link}"
                 )
                 
                 buttons = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📥 Download / Watch Video", url=final_link)],
-                    [InlineKeyboardButton("❤️ Join Our Channel", url=CACHE["tutorial_url"])]
+                    [InlineKeyboardButton("📥 Download / Watch Video", url=link)],
+                    [InlineKeyboardButton("🔞 Join Premium Channel", url=CACHE["tutorial_url"])]
                 ])
 
-                # ৫. পোস্ট করা (Final Step)
+                # পোস্টিং লজিক (অ্যালবাম + বাটন)
                 dest = int(CACHE["public_channel"])
                 try:
-                    if thumb_path and os.path.exists(thumb_path):
-                        await app.send_photo(
-                            dest, 
-                            photo=thumb_path, 
-                            caption=pretty_caption, 
-                            reply_markup=buttons
-                        )
-                    else:
-                        # থাম্বনেইল একদমই না থাকলে টেক্সট যাবে (পোস্ট মিস হবে না)
-                        await app.send_message(
-                            dest, 
-                            text=pretty_caption, 
-                            reply_markup=buttons
-                        )
+                    # ১. যদি স্ক্রিনশট জেনারেট হয়, তাহলে অ্যালবাম হিসেবে পাঠাবে
+                    if thumbs:
+                        media_group = [InputMediaPhoto(t) for t in thumbs]
+                        await app.send_media_group(dest, media=media_group)
+                        # অ্যালবাম পাঠানোর পর নিচে বাটন সহ টেক্সট
+                        await app.send_message(dest, text=pretty_caption, reply_markup=buttons)
                     
-                    print(f"✅ Successfully Posted: {msg_id}")
-                    await queue_col.delete_one({"_id": video_data["_id"]})
-                
-                except FloodWait as e:
-                    print(f"⏳ Sleeping for {e.value}s (FloodWait)")
-                    await asyncio.sleep(e.value)
-                except ChatWriteForbidden:
-                    print("❌ Bot is not Admin in Public Channel!")
-                except Exception as e:
-                    print(f"❌ Final Post Error: {e}")
-                    # পোস্ট এরর হলেও কিউ থেকে সরাচ্ছি যাতে লুপ না হয়
-                    await queue_col.delete_one({"_id": video_data["_id"]})
+                    # ২. যদি স্ক্রিনশট না হয় (FFmpeg ফেইল), তাহলে সাধারণ পোস্ট
+                    else:
+                        print("⚠️ No thumbs generated, sending normal post")
+                        # অরিজিনাল থাম্বনেইল ট্রাই করা
+                        t_path = None
+                        if real_msg.thumbs:
+                            t_path = await app.download_media(real_msg.thumbs[0].file_id)
+                        
+                        if t_path:
+                            await app.send_photo(dest, t_path, caption=pretty_caption, reply_markup=buttons)
+                            os.remove(t_path)
+                        else:
+                            await app.send_message(dest, text=pretty_caption, reply_markup=buttons)
 
-                # ৬. আবর্জনা পরিষ্কার (Clean Up)
+                    print(f"✅ Posted: {msg_id}")
+                    await queue_col.delete_one({"_id": data["_id"]})
+
+                except Exception as e:
+                    print(f"❌ Post Failed: {e}")
+                    # এরর হলেও কিউ থেকে সরাচ্ছি
+                    await queue_col.delete_one({"_id": data["_id"]})
+
+                # ক্লিনআপ
                 try:
                     if video_path and os.path.exists(video_path): os.remove(video_path)
-                    if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
+                    for t in thumbs:
+                        if os.path.exists(t): os.remove(t)
                 except: pass
             
-            else:
-                # কিউ খালি থাকলে অপেক্ষা
-                pass
+            else: pass
 
         except Exception as e:
-            print(f"🔥 Critical Loop Error: {e}")
+            print(f"Loop Error: {e}")
             await asyncio.sleep(5)
         
-        # Interval (60 সেকেন্ড গ্যাপ যাতে বড় ভিডিও প্রসেস করতে পারে)
         await asyncio.sleep(CACHE.get("post_interval", 60))
 
-# ------------------- ৮. রানার -------------------
-
+# ------------------- রানার -------------------
 async def main():
     if not os.path.exists("downloads"): os.makedirs("downloads")
     await app.start()
     await load_config()
-    print("🤖 Bot Started Successfully! Waiting for Action...")
-    
-    # ব্যাকগ্রাউন্ড টাস্ক চালু করা
     asyncio.create_task(post_scheduler())
     await idle()
     await app.stop()
