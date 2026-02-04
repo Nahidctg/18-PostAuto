@@ -3,4 +3,4 @@ tgcrypto
 motor
 dnspython
 aiohttp
-hachoir
+opencv-python-headless
