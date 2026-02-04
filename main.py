@@ -2,319 +2,462 @@ import asyncio
 import os
 import shutil
 import time
+import logging
 import aiohttp
+import cv2  # OpenCV for Thumbnails
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, 
     InputMediaPhoto
 )
+from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiohttp import web
-import cv2  # OpenCV (For Thumbnails)
 
-# ------------------- ১. কনফিগারেশন -------------------
+# ====================================================================
+#                          ১. সিস্টেম কনফিগারেশন
+# ====================================================================
+
+# আপনার ক্রেডেনশিয়ালস
 API_ID = 22697010
 API_HASH = "fd88d7339b0371eb2a9501d523f3e2a7"
 BOT_TOKEN = "8303315439:AAGKPEugn60XGMC7_u4pOaZPnUWkWHvXSNM"
 MONGO_URL = "mongodb+srv://mewayo8672:mewayo8672@cluster0.ozhvczp.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-ADMIN_ID = 8172129114
+ADMIN_ID = 8172129114  # আপনার টেলিগ্রাম আইডি
 
-# ডাটাবেস
-mongo = AsyncIOMotorClient(MONGO_URL)
-db = mongo["Final_Bot_Pro"]
-queue_col = db["queue"]
-config_col = db["config"]
+# লগিং সেটআপ (কনসোলে বিস্তারিত দেখার জন্য)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("AutoBot_Pro")
 
-# গ্লোবাল কনফিগ (Default Values)
-CONFIG = {
-    "source": None,
-    "public": None,
-    "interval": 30,             # Default 30s
-    "shortener_domain": None,   # Link Shortener Domain
-    "shortener_key": None,      # Link Shortener API Key
-    "auto_delete": 0,           # 0 means OFF
-    "protect": False,           # Content Protection
-    "caption": "🎬 **{caption}**\n\n✨ **Quality:** HD 720p\n🔥 **Exclusive Content**"
+# ডাটাবেস সেটআপ
+mongo_client = AsyncIOMotorClient(MONGO_URL)
+db = mongo_client["Enterprise_Bot_DB"]  # ইউনিক ডাটাবেস নাম
+queue_collection = db["video_queue"]
+config_collection = db["bot_settings"]
+
+# গ্লোবাল মেমোরি কনফিগারেশন (ডিফল্ট ভ্যালু)
+SYSTEM_CONFIG = {
+    "source_channel": None,
+    "public_channel": None,
+    "post_interval": 30,          # ডিফল্ট ৩০ সেকেন্ড
+    "shortener_domain": None,
+    "shortener_key": None,
+    "auto_delete_time": 0,        # ০ মানে অফ
+    "protect_content": False,     # ডিফল্ট অফ
+    "caption_template": "🎬 **{caption}**\n\n✨ **Quality:** HD 720p\n🔥 **Exclusive Content**"
 }
 
-app = Client("Master_Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# পাইরোগ্রাম ক্লায়েন্ট
+app = Client(
+    "Enterprise_Session",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-# ------------------- ২. ওয়েব সার্ভার -------------------
-async def web_server():
-    async def handle(req): return web.Response(text="Bot is Active & Running!")
-    app_web = web.Application()
-    app_web.add_routes([web.get('/', handle)])
-    runner = web.AppRunner(app_web)
+# ====================================================================
+#                       ২. ওয়েব সার্ভার (Keep Alive)
+# ====================================================================
+
+async def web_server_handler(request):
+    return web.Response(text="✅ Bot is Running in Enterprise Mode!")
+
+async def start_web_server():
+    """বটকে সার্ভারে সজীব রাখার জন্য ওয়েব সার্ভার"""
+    app_runner = web.Application()
+    app_runner.add_routes([web.get('/', web_server_handler)])
+    runner = web.AppRunner(app_runner)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
-
-# ------------------- ৩. হেল্পার ফাংশনস -------------------
-
-async def load_settings():
-    """ডাটাবেস থেকে সব সেটিংস লোড করা"""
-    data = await config_col.find_one({"_id": "settings"})
-    if not data:
-        await config_col.insert_one({"_id": "settings"})
-        return
     
-    CONFIG.update(data)
-    # অপ্রয়োজনীয় key ক্লিনআপ
-    if "_id" in CONFIG: del CONFIG["_id"]
-    print("⚙️ Settings Loaded Successfully!")
+    # পোর্ট ডিটেকশন
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"🌍 Web Server started on port {port}")
 
-async def update_setting(key, value):
-    """সেটিংস আপডেট করা"""
-    await config_col.update_one({"_id": "settings"}, {"$set": {key: value}}, upsert=True)
-    CONFIG[key] = value
+# ====================================================================
+#                       ৩. হেল্পার ফাংশনস (টুলস)
+# ====================================================================
 
-async def get_short_link(long_url):
-    """লিংক শর্টনার API হ্যান্ডেলিং"""
-    if not CONFIG["shortener_domain"] or not CONFIG["shortener_key"]:
+async def load_database_settings():
+    """বট স্টার্ট হওয়ার সময় ডাটাবেস থেকে সেটিংস লোড করবে"""
+    settings = await config_collection.find_one({"_id": "global_settings"})
+    
+    if not settings:
+        # যদি প্রথমবার হয়, ডিফল্ট সেটিং তৈরি করবে
+        await config_collection.insert_one({"_id": "global_settings"})
+        logger.info("⚙️ New Settings Created in Database.")
+    else:
+        # ডাটাবেস থেকে মেমোরিতে লোড
+        SYSTEM_CONFIG["source_channel"] = settings.get("source_channel")
+        SYSTEM_CONFIG["public_channel"] = settings.get("public_channel")
+        SYSTEM_CONFIG["post_interval"] = settings.get("post_interval", 30)
+        SYSTEM_CONFIG["shortener_domain"] = settings.get("shortener_domain")
+        SYSTEM_CONFIG["shortener_key"] = settings.get("shortener_key")
+        SYSTEM_CONFIG["auto_delete_time"] = settings.get("auto_delete_time", 0)
+        SYSTEM_CONFIG["protect_content"] = settings.get("protect_content", False)
+        logger.info("⚙️ Settings Loaded Successfully.")
+
+async def update_database_setting(key, value):
+    """যেকোনো সেটিং পরিবর্তন হলে ডাটাবেসে আপডেট করবে"""
+    await config_collection.update_one(
+        {"_id": "global_settings"},
+        {"$set": {key: value}},
+        upsert=True
+    )
+    SYSTEM_CONFIG[key] = value
+
+async def shorten_url(long_url):
+    """লিংক শর্টনার API হ্যান্ডলিং"""
+    if not SYSTEM_CONFIG["shortener_domain"] or not SYSTEM_CONFIG["shortener_key"]:
         return long_url
 
     try:
-        # সাধারণ API ফরম্যাট: https://domain.com/api?api=KEY&url=URL
-        api_url = f"https://{CONFIG['shortener_domain']}/api?api={CONFIG['shortener_key']}&url={long_url}"
+        api_url = f"https://{SYSTEM_CONFIG['shortener_domain']}/api?api={SYSTEM_CONFIG['shortener_key']}&url={long_url}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as resp:
-                data = await resp.json()
-                if "shortenedUrl" in data:
-                    return data["shortenedUrl"]
+            async with session.get(api_url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "shortenedUrl" in data:
+                        return data["shortenedUrl"]
     except Exception as e:
-        print(f"Shortener Error: {e}")
+        logger.error(f"Shortener Failed: {e}")
     
-    return long_url  # ফেইল করলে অরিজিনাল লিংক দিবে
+    return long_url  # ফেইল করলে অরিজিনাল লিংক রিটার্ন করবে
 
-def generate_thumb_cv2(video_path, msg_id):
-    """OpenCV দিয়ে থাম্বনেইল জেনারেট (FFmpeg ছাড়া)"""
-    thumb_path = f"downloads/thumb_{msg_id}.jpg"
+def generate_thumbnail_opencv(video_path, message_id):
+    """OpenCV ব্যবহার করে ভিডিও থেকে থাম্বনেইল জেনারেট (FFmpeg ছাড়া)"""
+    thumbnail_path = f"downloads/thumb_{message_id}.jpg"
+    
     try:
-        vid = cv2.VideoCapture(video_path)
-        if not vid.isOpened(): return None
+        video_cap = cv2.VideoCapture(video_path)
+        if not video_cap.isOpened():
+            return None
         
-        # ১০ সেকেন্ড অথবা ভিডিওর মাঝখান থেকে ছবি নিবে
-        frames = vid.get(cv2.CAP_PROP_FRAME_COUNT)
-        fps = vid.get(cv2.CAP_PROP_FPS)
-        duration = frames / fps if fps > 0 else 0
+        # ভিডিওর ডিউরেশন ক্যালকুলেশন
+        total_frames = video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        fps = video_cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames / fps if fps > 0 else 0
         
-        target = 10 if duration > 15 else duration / 2
-        vid.set(cv2.CAP_PROP_POS_FRAMES, int(target * fps))
+        # ১০ সেকেন্ডের মাথায় অথবা ভিডিওর মাঝখান থেকে ফ্রেম নিবে
+        target_time = 10 if duration > 15 else (duration / 2)
+        target_frame = int(target_time * fps)
         
-        ret, frame = vid.read()
-        if ret:
-            cv2.imwrite(thumb_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-            vid.release()
-            return thumb_path
-        vid.release()
-    except: pass
+        video_cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        success, image = video_cap.read()
+        
+        if success:
+            # ইমেজ সেভ (High Quality)
+            cv2.imwrite(thumbnail_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            video_cap.release()
+            return thumbnail_path
+        
+        video_cap.release()
+    except Exception as e:
+        logger.error(f"Thumbnail Generation Error: {e}")
+    
     return None
 
-# ------------------- ৪. কমান্ড হ্যান্ডলার (সব কমান্ড) -------------------
+# ====================================================================
+#                       ৪. অ্যাডমিন কমান্ডস (সম্পূর্ণ)
+# ====================================================================
 
 @app.on_message(filters.command("start"))
-async def start_c(c, m):
-    # ইউজার ডেলিভারি পার্ট
-    if len(m.command) > 1:
-        return await deliver_content(c, m)
-
-    # অ্যাডমিন প্যানেল
-    if m.from_user.id == ADMIN_ID:
-        txt = (
-            "🛠 **ADMIN COMMANDS**\n\n"
-            "📌 `/setsource -100xxx` - Set Source Channel\n"
-            "📌 `/setpublic -100xxx` - Set Public Channel\n"
-            "⏱ `/setinterval 60` - Set Post Delay (Sec)\n"
-            "🔗 `/setshortener domain.com api_key`\n"
-            "⏳ `/autodelete 60` - Auto Delete (0 to off)\n"
-            "🛡 `/protect on/off` - Content Protection\n"
-            "📊 `/status` - Check Settings"
+async def start_handler(client, message):
+    # পার্ট ১: ইউজার ভিডিও ডেলিভারি
+    if len(message.command) > 1:
+        return await process_user_delivery(client, message)
+    
+    # পার্ট ২: সাধারণ ওয়েলকাম মেসেজ
+    if message.from_user.id == ADMIN_ID:
+        admin_text = (
+            "👑 **Admin Control Panel (Full Version)**\n\n"
+            "📡 **Channels:**\n"
+            "`/setsource -100xxxx` - Source Channel\n"
+            "`/setpublic -100xxxx` - Public Channel\n\n"
+            "⚙️ **Settings:**\n"
+            "`/setinterval 30` - Post Delay (Seconds)\n"
+            "`/autodelete 60` - Auto Delete Timer (0 to off)\n"
+            "`/protect on` - Content Protection (on/off)\n"
+            "`/setshortener domain key` - Link Shortener\n\n"
+            "📊 **Info:**\n"
+            "`/status` - Check Configuration"
         )
-        await m.reply(txt)
+        await message.reply(admin_text)
     else:
-        await m.reply("👋 I am an Auto Post Bot. Join channel for updates.")
-
-async def deliver_content(c, m):
-    """ভিডিও ডেলিভারি + অটো ডিলিট + প্রটেকশন"""
-    try:
-        msg_id = int(m.command[1])
-        if not CONFIG["source"]: return await m.reply("❌ Bot Maintenance Mode.")
-
-        sts = await m.reply("🔄 **Processing Video...**")
-        msg = await c.get_messages(int(CONFIG["source"]), msg_id)
-        
-        if not msg: return await sts.edit("❌ Content Deleted.")
-
-        # কপি করা (প্রটেকশন সেটিং অনুযায়ী)
-        caption = "✅ **Here is your video!**\n❌ **Don't Forward**"
-        
-        sent_msg = await msg.copy(
-            chat_id=m.chat.id,
-            caption=caption,
-            protect_content=CONFIG["protect"] # True/False
+        await message.reply(
+            "👋 **Hello!**\n"
+            "I am an Auto Post & Delivery Bot.\n"
+            "Please join our main channel to get content."
         )
-        await sts.delete()
-
-        # অটো ডিলিট লজিক
-        if CONFIG["auto_delete"] > 0:
-            notify = await m.reply(f"⏳ **This video will be deleted in {CONFIG['auto_delete']} seconds!**")
-            await asyncio.sleep(CONFIG["auto_delete"])
-            await sent_msg.delete()
-            await notify.delete()
-
-    except Exception as e:
-        print(f"Delivery Error: {e}")
-
-# ----- কনফিগারেশন কমান্ডস -----
 
 @app.on_message(filters.command("setsource") & filters.user(ADMIN_ID))
-async def set_src(c, m):
+async def set_source_command(client, message):
     try:
-        cid = int(m.command[1])
-        await update_setting("source", cid)
-        await m.reply(f"✅ Source Set: `{cid}`")
-    except: await m.reply("Usage: `/setsource -100xxxx`")
+        channel_id = int(message.command[1])
+        await update_database_setting("source_channel", channel_id)
+        await message.reply(f"✅ **Source Channel Updated:** `{channel_id}`")
+    except:
+        await message.reply("❌ **Error:** Usage: `/setsource -100123456789`")
 
 @app.on_message(filters.command("setpublic") & filters.user(ADMIN_ID))
-async def set_pub(c, m):
+async def set_public_command(client, message):
     try:
-        cid = int(m.command[1])
-        await update_setting("public", cid)
-        await m.reply(f"✅ Public Set: `{cid}`")
-    except: await m.reply("Usage: `/setpublic -100xxxx`")
+        channel_id = int(message.command[1])
+        await update_database_setting("public_channel", channel_id)
+        await message.reply(f"✅ **Public Channel Updated:** `{channel_id}`")
+    except:
+        await message.reply("❌ **Error:** Usage: `/setpublic -100123456789`")
 
 @app.on_message(filters.command("setinterval") & filters.user(ADMIN_ID))
-async def set_int(c, m):
+async def set_interval_command(client, message):
     try:
-        sec = int(m.command[1])
-        await update_setting("interval", sec)
-        await m.reply(f"⏱ Interval Set: `{sec} seconds`")
-    except: await m.reply("Usage: `/setinterval 60`")
+        seconds = int(message.command[1])
+        await update_database_setting("post_interval", seconds)
+        await message.reply(f"⏱ **Post Interval Set:** `{seconds} seconds`")
+    except:
+        await message.reply("❌ **Error:** Usage: `/setinterval 30`")
 
 @app.on_message(filters.command("autodelete") & filters.user(ADMIN_ID))
-async def set_ad(c, m):
+async def set_autodelete_command(client, message):
     try:
-        sec = int(m.command[1])
-        await update_setting("auto_delete", sec)
-        await m.reply(f"⏳ Auto Delete: `{sec} seconds`")
-    except: await m.reply("Usage: `/autodelete 60` (Set 0 to disable)")
+        seconds = int(message.command[1])
+        await update_database_setting("auto_delete_time", seconds)
+        await message.reply(f"⏳ **Auto Delete Timer:** `{seconds} seconds`")
+    except:
+        await message.reply("❌ **Error:** Usage: `/autodelete 60` (Use 0 to disable)")
 
 @app.on_message(filters.command("protect") & filters.user(ADMIN_ID))
-async def set_prot(c, m):
+async def set_protection_command(client, message):
     try:
-        val = m.command[1].lower()
-        if val == "on":
-            await update_setting("protect", True)
-            await m.reply("🛡 Content Protection: **ON**")
-        elif val == "off":
-            await update_setting("protect", False)
-            await m.reply("🛡 Content Protection: **OFF**")
+        state = message.command[1].lower()
+        if state == "on":
+            await update_database_setting("protect_content", True)
+            await message.reply("🛡 **Content Protection:** `ENABLED`")
+        elif state == "off":
+            await update_database_setting("protect_content", False)
+            await message.reply("🛡 **Content Protection:** `DISABLED`")
         else:
-            await m.reply("Usage: `/protect on` or `/protect off`")
-    except: await m.reply("Usage: `/protect on` or `/protect off`")
+            await message.reply("❌ Use: `/protect on` or `/protect off`")
+    except:
+        await message.reply("❌ Usage: `/protect on` or `/protect off`")
 
 @app.on_message(filters.command("setshortener") & filters.user(ADMIN_ID))
-async def set_short(c, m):
+async def set_shortener_command(client, message):
     try:
-        # /setshortener domain.com api_key
-        if len(m.command) < 3:
-            return await m.reply("Usage: `/setshortener domain.com api_key`")
+        if len(message.command) < 3:
+            return await message.reply("❌ Usage: `/setshortener domain.com api_key`")
         
-        dom = m.command[1]
-        key = m.command[2]
-        await update_setting("shortener_domain", dom)
-        await update_setting("shortener_key", key)
-        await m.reply(f"🔗 Shortener Set:\nDomain: `{dom}`\nKey: `{key}`")
-    except Exception as e: await m.reply(f"Error: {e}")
+        domain = message.command[1]
+        api_key = message.command[2]
+        
+        await update_database_setting("shortener_domain", domain)
+        await update_database_setting("shortener_key", api_key)
+        
+        await message.reply(f"🔗 **Shortener Configured:**\nDomain: `{domain}`\nKey: `{api_key}`")
+    except Exception as e:
+        await message.reply(f"❌ Error: {e}")
 
 @app.on_message(filters.command("status") & filters.user(ADMIN_ID))
-async def status_cmd(c, m):
-    q = await queue_col.count_documents({})
-    txt = (
-        f"📊 **SYSTEM STATUS**\n"
-        f"📥 Queue: `{q}`\n"
-        f"⏱ Interval: `{CONFIG['interval']}s`\n"
-        f"⏳ Auto Delete: `{CONFIG['auto_delete']}s`\n"
-        f"🛡 Protected: `{CONFIG['protect']}`\n"
-        f"📂 Source: `{CONFIG['source']}`\n"
-        f"📢 Public: `{CONFIG['public']}`\n"
-        f"🔗 Shortener: `{'Active' if CONFIG['shortener_domain'] else 'Disabled'}`"
+async def status_command(client, message):
+    queue_count = await queue_collection.count_documents({})
+    
+    status_msg = (
+        f"📊 **FULL SYSTEM STATUS**\n\n"
+        f"📥 **Queue Pending:** `{queue_count}`\n"
+        f"📂 **Source ID:** `{SYSTEM_CONFIG['source_channel']}`\n"
+        f"📢 **Public ID:** `{SYSTEM_CONFIG['public_channel']}`\n"
+        f"⏱ **Interval:** `{SYSTEM_CONFIG['post_interval']}s`\n"
+        f"⏳ **Auto Delete:** `{SYSTEM_CONFIG['auto_delete_time']}s`\n"
+        f"🛡 **Protection:** `{SYSTEM_CONFIG['protect_content']}`\n"
+        f"🔗 **Shortener:** `{'Active' if SYSTEM_CONFIG['shortener_domain'] else 'Inactive'}`"
     )
-    await m.reply(txt)
+    await message.reply(status_msg)
 
-# ------------------- ৫. অটো পোস্টিং ইঞ্জিন -------------------
+# ====================================================================
+#                       ৫. ইউজার ডেলিভারি লজিক
+# ====================================================================
+
+async def process_user_delivery(client, message):
+    try:
+        msg_id = int(message.command[1])
+        
+        # কনফিগারেশন চেক
+        if not SYSTEM_CONFIG["source_channel"]:
+            return await message.reply("❌ **Bot is under maintenance.** (Source not set)")
+        
+        status_msg = await message.reply("🔄 **Fetching your video... Please wait.**")
+        
+        # সোর্স থেকে ভিডিও কপি করা
+        source_msg = await client.get_messages(int(SYSTEM_CONFIG["source_channel"]), msg_id)
+        
+        if not source_msg or (not source_msg.video and not source_msg.document):
+            return await status_msg.edit("❌ **Error:** Video not found or deleted.")
+        
+        # ভিডিও পাঠানো
+        sent_msg = await source_msg.copy(
+            chat_id=message.chat.id,
+            caption="✅ **Here is your requested video!**\n❌ **Do not forward this message.**",
+            protect_content=SYSTEM_CONFIG["protect_content"]
+        )
+        
+        await status_msg.delete()
+        
+        # অটো ডিলিট লজিক
+        if SYSTEM_CONFIG["auto_delete_time"] > 0:
+            warning = await message.reply(f"⚠️ **Note:** This video will be auto-deleted in {SYSTEM_CONFIG['auto_delete_time']} seconds!")
+            await asyncio.sleep(SYSTEM_CONFIG["auto_delete_time"])
+            await sent_msg.delete()
+            await warning.delete()
+            
+    except Exception as e:
+        logger.error(f"User Delivery Error: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
+
+# ====================================================================
+#                       ৬. ভিডিও মনিটরিং (Source Listener)
+# ====================================================================
+
 @app.on_message(filters.channel & (filters.video | filters.document))
-async def listener(c, m):
-    if CONFIG["source"] and m.chat.id == int(CONFIG["source"]):
-        if m.video or (m.document and "video" in m.document.mime_type):
-            if not await queue_col.find_one({"msg_id": m.id}):
-                await queue_col.insert_one({"msg_id": m.id, "caption": m.caption, "date": m.date})
-                print(f"📥 New Video: {m.id}")
+async def source_channel_listener(client, message):
+    # শুধুমাত্র কনফিগার করা সোর্স চ্যানেল থেকে ভিডিও নিবে
+    if SYSTEM_CONFIG["source_channel"] and message.chat.id == int(SYSTEM_CONFIG["source_channel"]):
+        
+        # ফাইলটি ভিডিও কিনা নিশ্চিত হওয়া
+        is_video = message.video or (message.document and message.document.mime_type and "video" in message.document.mime_type)
+        
+        if is_video:
+            # ডাটাবেসে ডুপ্লিকেট চেক
+            exists = await queue_collection.find_one({"msg_id": message.id})
+            if not exists:
+                await queue_collection.insert_one({
+                    "msg_id": message.id,
+                    "caption": message.caption or "Exclusive Video",
+                    "date": message.date
+                })
+                logger.info(f"📥 New Video Queued: ID {message.id}")
 
-async def processor():
-    if not os.path.exists("downloads"): os.makedirs("downloads")
-    print("🚀 Engine Started...")
+# ====================================================================
+#                       ৭. মেইন প্রসেসিং ইঞ্জিন (The Core)
+# ====================================================================
+
+async def processing_engine():
+    # ডাউনলোড ফোল্ডার তৈরি
+    if not os.path.exists("downloads"):
+        os.makedirs("downloads")
+        
+    logger.info("🚀 Processing Engine Started Successfully...")
     
     while True:
         try:
-            if not CONFIG["source"] or not CONFIG["public"]:
-                await asyncio.sleep(20); continue
-
-            task = await queue_col.find_one(sort=[("date", 1)])
+            # কনফিগারেশন চেক
+            if not SYSTEM_CONFIG["source_channel"] or not SYSTEM_CONFIG["public_channel"]:
+                logger.warning("⚠️ Source or Public Channel not set. Waiting 20s...")
+                await asyncio.sleep(20)
+                continue
+            
+            # ১. কিউ থেকে সবচেয়ে পুরনো ভিডিও নেওয়া
+            task = await queue_collection.find_one(sort=[("date", 1)])
+            
             if task:
                 msg_id = task["msg_id"]
-                try:
-                    # ১. ভিডিও ডাউনলোড
-                    msg = await app.get_messages(int(CONFIG["source"]), msg_id)
-                    if not msg:
-                        await queue_col.delete_one({"_id": task["_id"]}); continue
-                    
-                    v_path = f"downloads/v_{msg_id}.mp4"
-                    await app.download_media(msg, file_name=v_path)
-
-                    # ২. থাম্বনেইল জেনারেট (OpenCV)
-                    t_path = generate_thumb_cv2(v_path, msg_id)
-
-                    # ৩. লিংক শর্ট করা
-                    bot_usr = (await app.get_me()).username
-                    raw_link = f"https://t.me/{bot_usr}?start={msg_id}"
-                    final_link = await get_short_link(raw_link)
-
-                    # ৪. পাবলিক চ্যানেলে পোস্ট
-                    cap = CONFIG["caption"].format(caption=task.get('caption', 'Video')[:100])
-                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("📥 DOWNLOAD / WATCH 📥", url=final_link)]])
-                    dest = int(CONFIG["public"])
-
-                    if t_path and os.path.exists(t_path):
-                        await app.send_photo(dest, t_path, caption=cap, reply_markup=btn)
-                    else:
-                        await app.send_message(dest, cap + "\n\n⚠️ No Thumb", reply_markup=btn)
-                    
-                    print(f"✅ Posted: {msg_id}")
-
-                except Exception as e:
-                    print(f"Error: {e}")
+                logger.info(f"🔨 Processing Message ID: {msg_id}")
                 
-                # ক্লিনআপ
-                await queue_col.delete_one({"_id": task["_id"]})
                 try:
-                    if os.path.exists(v_path): os.remove(v_path)
-                    if t_path and os.path.exists(t_path): os.remove(t_path)
+                    # ২. ভিডিও ফেচ করা
+                    source_msg = await app.get_messages(int(SYSTEM_CONFIG["source_channel"]), msg_id)
+                    
+                    if not source_msg:
+                        logger.error("❌ Message deleted from source.")
+                        await queue_collection.delete_one({"_id": task["_id"]})
+                        continue
+                    
+                    # ৩. ভিডিও ডাউনলোড (থাম্বনেইলের জন্য)
+                    video_path = f"downloads/video_{msg_id}.mp4"
+                    logger.info("⬇️ Downloading Video for Thumbnail Generation...")
+                    await app.download_media(source_msg, file_name=video_path)
+                    
+                    # ৪. থাম্বনেইল জেনারেট (OpenCV)
+                    logger.info("🎨 Generating Thumbnail with OpenCV...")
+                    thumb_path = generate_thumbnail_opencv(video_path, msg_id)
+                    
+                    # ৫. ডিপ লিংক তৈরি ও শর্ট করা
+                    bot_username = (await app.get_me()).username
+                    deep_link = f"https://t.me/{bot_username}?start={msg_id}"
+                    final_link = await shorten_url(deep_link)
+                    
+                    # ৬. ক্যাপশন ও বাটন তৈরি
+                    raw_caption = task.get("caption", "New Video")[:100]
+                    final_caption = SYSTEM_CONFIG["caption_template"].format(caption=raw_caption)
+                    
+                    buttons = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📥 DOWNLOAD / WATCH VIDEO 📥", url=final_link)]
+                    ])
+                    
+                    # ৭. পাবলিক চ্যানেলে পোস্ট (শুধুমাত্র ছবি + বাটন)
+                    dest_chat = int(SYSTEM_CONFIG["public_channel"])
+                    
+                    if thumb_path and os.path.exists(thumb_path):
+                        await app.send_photo(
+                            chat_id=dest_chat,
+                            photo=thumb_path,
+                            caption=final_caption,
+                            reply_markup=buttons
+                        )
+                    else:
+                        # থাম্বনেইল না থাকলে
+                        await app.send_message(
+                            chat_id=dest_chat,
+                            text=final_caption + "\n\n⚠️ *No Preview Available*",
+                            reply_markup=buttons
+                        )
+                    
+                    logger.info(f"✅ Post Successful: ID {msg_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Processing Error: {e}")
+                
+                # ৮. ক্লিনআপ (ফাইল ডিলিট এবং ডাটাবেস আপডেট)
+                await queue_collection.delete_one({"_id": task["_id"]})
+                
+                try:
+                    if os.path.exists(video_path): os.remove(video_path)
+                    if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
                 except: pass
             
-            # ইউজার সেট করা ইন্টারভাল অনুযায়ী অপেক্ষা
-            await asyncio.sleep(CONFIG.get("interval", 30))
-
+            # ৯. পোস্টিং ইন্টারভাল
+            wait_time = SYSTEM_CONFIG.get("post_interval", 30)
+            await asyncio.sleep(wait_time)
+            
         except Exception as e:
-            print(f"Loop Error: {e}"); await asyncio.sleep(10)
+            logger.critical(f"🛑 Critical Engine Loop Error: {e}")
+            await asyncio.sleep(10)
 
-# ------------------- ৬. মেইন রানার -------------------
+# ====================================================================
+#                       ৮. অ্যাপ রানার
+# ====================================================================
+
+async def main():
+    # ওয়েব সার্ভার চালু
+    asyncio.create_task(start_web_server())
+    
+    # বট স্টার্ট
+    await app.start()
+    
+    # সেটিংস লোড
+    await load_database_settings()
+    
+    # প্রসেসিং ইঞ্জিন চালু
+    asyncio.create_task(processing_engine())
+    
+    logger.info("🤖 Bot is now Idle and Waiting for Tasks...")
+    await idle()
+    
+    await app.stop()
+
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.create_task(web_server())
-    loop.create_task(processor())
-    
-    app.start()
-    loop.run_until_complete(load_settings()) # সেটিংস লোড
-    print("🤖 Bot Fully Active with All Commands!")
-    idle()
-    app.stop()
+    loop.run_until_complete(main())
