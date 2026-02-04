@@ -2,238 +2,265 @@ import asyncio
 import logging
 import aiohttp
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
+from pyrogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorClient
 
-# ------------------- CONFIGURATION -------------------
-# আপনার তথ্যগুলো এখানে বসান
-API_ID = 1234567  # আপনার API ID
+# ------------------- CONFIGURATION (FIXED) -------------------
+# এই অংশগুলো শুধু একবারই বসাবেন, এগুলো বারবার বদলানোর দরকার নেই
+API_ID = 1234567       # আপনার API ID
 API_HASH = "your_api_hash_here"
 BOT_TOKEN = "your_bot_token_here"
 MONGO_URL = "your_mongodb_connection_string"
-SOURCE_CHANNEL = -1001234567890  # প্রাইভেট চ্যানেলের ID
-PUBLIC_CHANNEL = -1009876543210  # পাবলিক চ্যানেলের ID
-ADMIN_ID = 123456789  # আপনার নিজের টেলিগ্রাম ID
+ADMIN_ID = 123456789   # আপনার টেলিগ্রাম আইডি (যে শুধু কন্ট্রোল করবে)
 
 # ------------------- DATABASE CONNECTION -------------------
 mongo_client = AsyncIOMotorClient(MONGO_URL)
 db = mongo_client["AutoPostBot"]
-queue_col = db["video_queue"]  # ভিডিও কিউ বা লাইন
+queue_col = db["video_queue"]  # ভিডিও কিউ
 config_col = db["config"]      # সেটিংস স্টোর
 
-# ডিফল্ট সেটিংস
-DEFAULT_CONFIG = {
-    "_id": "settings",
-    "shortener_api": "",   # শর্টনার API URL
-    "shortener_key": "",   # শর্টনার API Key
-    "auto_delete": 0,      # 0 মানে অফ, অন্যথায় সেকেন্ড
-    "protect_content": False, # ফরোয়ার্ড রেস্ট্রিকশন
-    "caption_text": "🎬 **Watch the full video!**"
+# মেমোরিতে ডাটা ক্যাশ করে রাখা (যাতে বারবার ডাটাবেস কল না হয়)
+CACHE = {
+    "source_channel": None,
+    "public_channel": None,
+    "shortener_api": None,
+    "shortener_key": None,
+    "auto_delete": 0,
+    "protect_content": False
 }
 
 app = Client("smart_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ------------------- HELPER FUNCTIONS -------------------
 
-# সেটিংস লোড করা
-async def get_config():
+# বট চালু হওয়ার সময় ডাটাবেস থেকে সেটিংস লোড করা
+async def load_config():
     conf = await config_col.find_one({"_id": "settings"})
     if not conf:
-        await config_col.insert_one(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG
-    return conf
+        # ডিফল্ট সেটিংস তৈরি
+        default_conf = {
+            "_id": "settings",
+            "source_channel": None,
+            "public_channel": None,
+            "shortener_api": "",
+            "shortener_key": "",
+            "auto_delete": 0,
+            "protect_content": False
+        }
+        await config_col.insert_one(default_conf)
+        conf = default_conf
+    
+    # ক্যাশ আপডেট করা
+    CACHE.update(conf)
+    print("✅ Configuration Loaded:", CACHE)
 
-# সেটিংস আপডেট করা
+# সেটিংস আপডেট করার ফাংশন
 async def update_config(key, value):
     await config_col.update_one({"_id": "settings"}, {"$set": {key: value}}, upsert=True)
+    CACHE[key] = value # সাথে সাথে ক্যাশ আপডেট
 
-# লিংক শর্ট করা
+# লিংক শর্টনার ফাংশন
 async def shorten_link(link):
-    conf = await get_config()
-    api_url = conf.get("shortener_api")
-    api_key = conf.get("shortener_key")
-
-    if not api_url or not api_key:
-        return link  # শর্টনার সেট না থাকলে আসল লিংকই দেবে
+    if not CACHE["shortener_api"] or not CACHE["shortener_key"]:
+        return link
 
     try:
-        # সাপোর্ট করবে: ?api={key}&url={link} ফরম্যাট
+        api_url = CACHE["shortener_api"]
+        api_key = CACHE["shortener_key"]
         full_url = f"{api_url}?api={api_key}&url={link}"
+        
         async with aiohttp.ClientSession() as session:
             async with session.get(full_url) as resp:
                 data = await resp.json()
-                # শর্টনার ভেদে রেস্পন্স আলাদা হতে পারে (ShortUrl/shortenedUrl)
                 return data.get("shortenedUrl") or data.get("url") or link
     except Exception as e:
         print(f"Shortener Error: {e}")
         return link
 
-# ------------------- ADMIN COMMANDS -------------------
+# ------------------- ADMIN COMMANDS (SETUP) -------------------
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message):
-    # যদি লিংকে কোনো প্যারামিটার থাকে (ফাইল এক্সেস করার জন্য)
     if len(message.command) > 1:
         return await send_stored_file(client, message)
     
     await message.reply_text(
-        "👋 **স্বাগতম!** আমি অটো পোস্টিং এবং ফাইল স্টোর বট।\n\n"
-        "শুধু এডমিন আমাকে নিয়ন্ত্রণ করতে পারবে।"
+        "👋 **স্বাগতম!** আমি অটো পোস্টার বট।\n\n"
+        "🛠 **সেটআপ কমান্ড (শুধুমাত্র এডমিন):**\n"
+        "1. `/setsource -100xxxx` (যে চ্যানেল থেকে ভিডিও নেব)\n"
+        "2. `/setpublic -100xxxx` (যে চ্যানেলে পোস্ট করব)\n"
+        "3. `/setshortener API_URL API_KEY` (লিংক শর্টনার)\n"
+        "4. `/autodelete 600` (সেকেন্ড)\n"
+        "5. `/status` (বর্তমান অবস্থা)"
     )
 
+# ১. সোর্স চ্যানেল সেট করা
+@app.on_message(filters.command("setsource") & filters.user(ADMIN_ID))
+async def set_source(client, message):
+    try:
+        chat_id = int(message.command[1])
+        await update_config("source_channel", chat_id)
+        await message.reply_text(f"✅ **সোর্স চ্যানেল সেট করা হয়েছে:** `{chat_id}`")
+    except:
+        await message.reply_text("❌ ভুল! লিখুন: `/setsource -100123456789`")
+
+# ২. পাবলিক চ্যানেল সেট করা
+@app.on_message(filters.command("setpublic") & filters.user(ADMIN_ID))
+async def set_public(client, message):
+    try:
+        chat_id = int(message.command[1])
+        await update_config("public_channel", chat_id)
+        await message.reply_text(f"✅ **পাবলিক চ্যানেল সেট করা হয়েছে:** `{chat_id}`")
+    except:
+        await message.reply_text("❌ ভুল! লিখুন: `/setpublic -100987654321`")
+
+# ৩. শর্টনার সেট করা
 @app.on_message(filters.command("setshortener") & filters.user(ADMIN_ID))
 async def set_shortener(client, message):
-    # ব্যবহার: /setshortener https://api.gplinks.com/api api_key_here
     try:
         _, url, key = message.text.split(" ")
         await update_config("shortener_api", url)
         await update_config("shortener_key", key)
-        await message.reply_text("✅ **লিংক শর্টনার সফলভাবে সেট করা হয়েছে!**")
-    except ValueError:
-        await message.reply_text("❌ ভুল ফরম্যাট। লিখুন:\n`/setshortener API_URL API_KEY`")
+        await message.reply_text("✅ **লিংক শর্টনার আপডেট করা হয়েছে!**")
+    except:
+        await message.reply_text("❌ ভুল! লিখুন: `/setshortener API_URL API_KEY`")
 
+# ৪. অটো ডিলিট এবং প্রটেক্ট
 @app.on_message(filters.command("autodelete") & filters.user(ADMIN_ID))
 async def set_autodelete(client, message):
-    # ব্যবহার: /autodelete 600 (সেকেন্ডে) অথবা 0 বন্ধ করতে
     try:
         seconds = int(message.command[1])
         await update_config("auto_delete", seconds)
-        status = f"{seconds} সেকেন্ড" if seconds > 0 else "OFF"
-        await message.reply_text(f"✅ **অটো ডিলিট টাইমার সেট করা হয়েছে:** {status}")
+        await message.reply_text(f"✅ অটো ডিলিট: {seconds} সেকেন্ড")
     except:
-        await message.reply_text("❌ ভুল। লিখুন: `/autodelete 600` (১০ মিনিট)")
+        await message.reply_text("❌ ভুল! উদাহরণ: `/autodelete 600`")
 
 @app.on_message(filters.command("protect") & filters.user(ADMIN_ID))
 async def toggle_protect(client, message):
-    # ব্যবহার: /protect on অথবা /protect off
-    try:
-        state = message.command[1].lower()
-        if state == "on":
-            await update_config("protect_content", True)
-            await message.reply_text("🔒 **ফরোয়ার্ড প্রটেকশন চালু করা হয়েছে।**")
-        elif state == "off":
-            await update_config("protect_content", False)
-            await message.reply_text("🔓 **ফরোয়ার্ড প্রটেকশন বন্ধ করা হয়েছে।**")
-    except:
-        await message.reply_text("❌ লিখুন: `/protect on` অথবা `/protect off`")
+    state = message.command[1].lower() == "on"
+    await update_config("protect_content", state)
+    await message.reply_text(f"✅ কন্টেন্ট প্রটেকশন: {'ON' if state else 'OFF'}")
 
+# ৫. স্ট্যাটাস চেক
 @app.on_message(filters.command("status") & filters.user(ADMIN_ID))
-async def check_status(client, message):
-    queue_count = await queue_col.count_documents({})
-    conf = await get_config()
-    text = (
-        f"📊 **System Status**\n"
-        f"📥 Queue Size: {queue_count} Videos\n"
-        f"🔗 Shortener: {'Active' if conf['shortener_api'] else 'Not Set'}\n"
-        f"🗑 Auto Delete: {conf['auto_delete']}s\n"
-        f"🔒 Protect: {conf['protect_content']}"
+async def status(client, message):
+    q_len = await queue_col.count_documents({})
+    txt = (
+        f"📊 **Bot Status**\n"
+        f"📥 Source Channel: `{CACHE['source_channel']}`\n"
+        f"📢 Public Channel: `{CACHE['public_channel']}`\n"
+        f"⏳ Queue Pending: {q_len}\n"
+        f"🔗 Shortener: {'Active' if CACHE['shortener_api'] else 'Inactive'}"
     )
-    await message.reply_text(text)
+    await message.reply_text(txt)
 
-# ------------------- SOURCE CHANNEL LISTENER -------------------
+# ------------------- LOGIC: WATCHING & POSTING -------------------
 
-@app.on_message(filters.chat(SOURCE_CHANNEL) & filters.video)
+# সোর্স চ্যানেল থেকে ভিডিও ধরা
+@app.on_message(filters.channel & filters.video)
 async def incoming_video(client, message):
-    # সোর্স চ্যানেল থেকে ভিডিও আসলে ডাটাবেসে সেভ হবে
-    video_data = {
-        "msg_id": message.id,
-        "caption": message.caption or "New Video",
-        "file_id": message.video.file_id,
-        "date": message.date
-    }
-    await queue_col.insert_one(video_data)
-    # কনসোলে প্রিন্ট (ডিবাগিংয়ের জন্য)
-    print(f"New video added to DB Queue: {message.id}")
+    # চেক করি মেসেজটি আমাদের সেট করা সোর্স চ্যানেল থেকে এসেছে কি না
+    if CACHE["source_channel"] and message.chat.id == int(CACHE["source_channel"]):
+        video_data = {
+            "msg_id": message.id,
+            "caption": message.caption or "New Video",
+            "file_id": message.video.file_id,
+            "date": message.date
+        }
+        await queue_col.insert_one(video_data)
+        print(f"📥 Queued video from {message.chat.title}")
 
-# ------------------- PUBLIC POSTER & FILE SENDER -------------------
-
-# ১. ফাইল সেন্ডার (যখন ইউজার লিংকে ক্লিক করবে)
+# ফাইল ডেলিভারি (ইউজার যখন লিংকে ক্লিক করবে)
 async def send_stored_file(client, message):
     try:
-        # কমান্ড থেকে ম্যাসেজ আইডি বের করা (start=msg_id)
+        if not CACHE["source_channel"]:
+            return await message.reply_text("❌ এডমিন এখনো সোর্স চ্যানেল সেট করেনি।")
+
         msg_id = int(message.command[1])
         
-        # সোর্স চ্যানেল থেকে ভিডিওটি কপি করে আনা
-        file_msg = await client.get_messages(SOURCE_CHANNEL, msg_id)
-        if not file_msg or not file_msg.video:
-            return await message.reply_text("❌ ফাইলটি পাওয়া যাচ্ছে না বা ডিলিট হয়েছে।")
-
-        conf = await get_config()
+        # সোর্স চ্যানেল থেকে কপি করা
+        file_msg = await client.get_messages(int(CACHE["source_channel"]), msg_id)
         
-        # ফাইল পাঠানো
-        sent_msg = await file_msg.copy(
+        if not file_msg or not file_msg.video:
+            return await message.reply_text("❌ ফাইলটি ডিলিট হয়ে গেছে।")
+
+        sent = await file_msg.copy(
             chat_id=message.chat.id,
             caption=f"🎥 **{file_msg.caption[:50]}...**",
-            protect_content=conf["protect_content"] # ফরওয়ার্ড অন/অফ
+            protect_content=CACHE["protect_content"]
         )
 
-        # অটো ডিলিট লজিক
-        if conf["auto_delete"] > 0:
-            await message.reply_text(f"⚠️ এই ভিডিওটি {conf['auto_delete']} সেকেন্ড পর ডিলিট হয়ে যাবে।")
-            await asyncio.sleep(conf["auto_delete"])
-            await sent_msg.delete()
-            
-    except Exception as e:
-        await message.reply_text(f"Error: {e}")
+        if CACHE["auto_delete"] > 0:
+            await message.reply_text(f"⏳ **This video will be deleted in {CACHE['auto_delete']} seconds!**")
+            await asyncio.sleep(CACHE["auto_delete"])
+            await sent.delete()
 
-# ২. শিডিউলার (প্রতি ৩০ মিনিট পর পর পাবলিক চ্যানেলে পোস্ট করা)
+    except Exception as e:
+        await message.reply_text("❌ টেকনিক্যাল সমস্যা বা চ্যানেল অ্যাক্সেস নেই।")
+        print(f"Delivery Error: {e}")
+
+# শিডিউলার (অটোমেটিক পোস্টার)
 async def post_scheduler():
     while True:
         try:
-            # ডাটাবেস থেকে সবথেকে পুরনো ভিডিওটি খুঁজে বের করা
+            # যদি পাবলিক বা সোর্স চ্যানেল সেট করা না থাকে, অপেক্ষা করো
+            if not CACHE["source_channel"] or not CACHE["public_channel"]:
+                await asyncio.sleep(60)
+                continue
+
+            # ডাটাবেস থেকে ভিডিও খোজা
             video_data = await queue_col.find_one(sort=[("date", 1)])
             
             if video_data:
                 msg_id = video_data["msg_id"]
-                original_caption = video_data["caption"]
-
-                # থাম্বনেইল পাওয়ার জন্য আসল ম্যাসেজটি লোড করা
-                real_msg = await app.get_messages(SOURCE_CHANNEL, msg_id)
-                thumb_path = await app.download_media(real_msg.thumbs[0].file_id) if real_msg.thumbs else None
-
-                # স্টার্ট লিংক তৈরি (বটের ইউজারনেম দিয়ে)
-                bot_info = await app.get_me()
-                base_link = f"https://t.me/{bot_info.username}?start={msg_id}"
                 
-                # লিংক শর্ট করা
-                short_link = await shorten_link(base_link)
+                # রিয়েল ভিডিও মেসেজ আনা (থাম্বনেইলের জন্য)
+                try:
+                    real_msg = await app.get_messages(int(CACHE["source_channel"]), msg_id)
+                    thumb = await app.download_media(real_msg.thumbs[0].file_id) if real_msg.thumbs else None
+                except:
+                    # যদি সোর্স থেকে ভিডিও ডিলিট হয়ে যায়, কিউ থেকেও ডিলিট করে পরেরটায় যাবে
+                    await queue_col.delete_one({"_id": video_data["_id"]})
+                    continue
 
-                # পাবলিক চ্যানেলের জন্য পোস্ট সাজানো
-                post_caption = (
-                    f"🎬 **{original_caption}**\n\n"
-                    f"🔗 **Download / Watch Video:**\n{short_link}\n\n"
-                    f"👉 **Click the link above to watch!**"
+                # লিংক তৈরি
+                bot_usr = (await app.get_me()).username
+                start_link = f"https://t.me/{bot_usr}?start={msg_id}"
+                final_link = await shorten_link(start_link)
+
+                caption = (
+                    f"🎬 **{video_data['caption']}**\n\n"
+                    f"🔗 **Download Link:**\n{final_link}\n\n"
+                    f"👉 Join Channel for more!"
                 )
 
-                # পোস্ট করা
-                if thumb_path:
-                    await app.send_photo(PUBLIC_CHANNEL, photo=thumb_path, caption=post_caption)
+                # পাবলিক চ্যানেলে পোস্ট
+                dest_id = int(CACHE["public_channel"])
+                if thumb:
+                    await app.send_photo(dest_id, thumb, caption=caption)
                 else:
-                    await app.send_message(PUBLIC_CHANNEL, post_caption)
+                    await app.send_message(dest_id, caption)
 
-                # কাজ শেষে ডাটাবেস থেকে রিমুভ করা
+                # কিউ থেকে ডিলিট
                 await queue_col.delete_one({"_id": video_data["_id"]})
-                print(f"Posted video {msg_id} to Public Channel")
+                print(f"✅ Posted video {msg_id}")
 
             else:
-                print("Queue empty. Waiting...")
+                print("💤 Queue Empty...")
 
         except Exception as e:
             print(f"Scheduler Error: {e}")
 
-        # ৩০ মিনিট (১৮০০ সেকেন্ড) অপেক্ষা
-        await asyncio.sleep(1800) 
+        await asyncio.sleep(1800) # ৩০ মিনিট বিরতি
 
-# ------------------- RUN BOT -------------------
+# ------------------- RUNNER -------------------
 
 async def main():
     await app.start()
-    print("Bot Started! Scheduler running...")
+    await load_config() # বট চালুর সময় কনফিগারেশন লোড হবে
+    print("🤖 Bot Started Successfully!")
     
-    # শিডিউলার ব্যাকগ্রাউন্ডে চালু করা
     asyncio.create_task(post_scheduler())
-    
     await idle()
     await app.stop()
 
