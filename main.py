@@ -75,7 +75,7 @@ app = Client(
 
 async def web_server_handler(request):
     """সিম্পল ওয়েব পেজ রেসপন্স"""
-    return web.Response(text="✅ Bot is Running in Ultimate Mode with Collage Support!")
+    return web.Response(text="✅ Bot is Running in Ultimate Mode with High Quality Collage Support!")
 
 async def start_web_server():
     """aiohttp ওয়েব সার্ভার রানার"""
@@ -174,13 +174,13 @@ async def shorten_url_api(long_url):
     return long_url
 
 # ====================================================================
-#                ৪. থাম্বনেইল জেনারেটর (Updated Logic)
+#                ৪. থাম্বনেইল জেনারেটর (মডিফাইড - চ্যাপ্টা হবে না)
 # ====================================================================
 
 def generate_collage_thumbnail(video_path, message_id):
     """
     ভিডিও থেকে ৪টি ফ্রেম নিয়ে কোলাজ তৈরি করবে।
-    ভিডিও ছোট হলেও (১ মিনিটের কম) এটি কাজ করবে।
+    এখানে ভিডিওর অরিজিনাল রেশিও বজায় রাখা হয়েছে যাতে ছবি চ্যাপ্টা না দেখায়।
     """
     thumbnail_path = f"downloads/thumb_{message_id}.jpg"
     
@@ -189,18 +189,23 @@ def generate_collage_thumbnail(video_path, message_id):
         if not cap.isOpened():
             return None
         
-        # ভিডিওর মোট ফ্রেম সংখ্যা এবং FPS
+        # ভিডিওর অরিজিনাল উইডথ, হাইট এবং মোট ফ্রেম সংখ্যা
+        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # যদি ভিডিও একদমই ছোট বা করাপ্ট হয় (১০ ফ্রেমের কম)
         if total_frames < 10:
             cap.release()
             return None
             
         frames = []
-        # ৪টি পয়েন্ট থেকে ফ্রেম নিবে (২০%, ৪০%, ৬০%, ৮০%)
-        # ছোট ভিডিও হলেও এই লজিক কাজ করবে
-        percentages = [0.20, 0.40, 0.60, 0.80]
+        # ৪টি পয়েন্ট থেকে ফ্রেম নিবে
+        percentages = [0.15, 0.40, 0.65, 0.85]
+        
+        # ক্যালকুলেশন: চ্যাপ্টা হওয়া রোধ করতে উইডথ ফিক্সড রেখে হাইট রেশিও অনুযায়ী বের করা
+        target_w = 640
+        aspect_ratio = orig_h / orig_w
+        target_h = int(target_w * aspect_ratio)
         
         for p in percentages:
             target_frame = int(total_frames * p)
@@ -208,38 +213,37 @@ def generate_collage_thumbnail(video_path, message_id):
             success, img = cap.read()
             
             if success:
-                # ইমেজ রিসাইজ (সবগুলো একই সাইজ হওয়া জরুরি কোলাজের জন্য)
-                # 640x360 পিক্সেল (Standard 16:9)
-                resized = cv2.resize(img, (640, 360))
+                # উন্নত কোয়ালিটির জন্য INTER_LANCZOS4 ব্যবহার করা হয়েছে
+                resized = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
                 frames.append(resized)
             else:
-                # ফ্রেম রিড করতে না পারলে লুপ ব্রেক
                 break
         
         cap.release()
         
-        # এখন কোলাজ বানানোর পালা
         if len(frames) == 4:
-            # যদি ৪টাই পাওয়া যায়: ২x২ গ্রিড
-            top_row = np.hstack((frames[0], frames[1]))
-            bottom_row = np.hstack((frames[2], frames[3]))
-            collage = np.vstack((top_row, bottom_row))
+            # মাঝখানে সাদা চিকন বর্ডার দেওয়ার জন্য (ডিভাইডার)
+            # Vertical Divider
+            border_v = np.ones((target_h, 10, 3), dtype=np.uint8) * 255 
+            # Horizontal Divider
+            
+            top_row = np.hstack((frames[0], border_v, frames[1]))
+            bottom_row = np.hstack((frames[2], border_v, frames[3]))
+            
+            border_h = np.ones((10, top_row.shape[1], 3), dtype=np.uint8) * 255
+            
+            collage = np.vstack((top_row, border_h, bottom_row))
             
         elif len(frames) >= 2:
-            # যদি অন্তত ২টা পাওয়া যায়: পাশাপাশি ২টা
             collage = np.hstack((frames[0], frames[1]))
-            
         elif len(frames) == 1:
-            # যদি মাত্র ১টা পাওয়া যায়
             collage = frames[0]
-            
         else:
             return None
 
-        # ফাইনাল ইমেজ সেভ করা (High Quality)
+        # হাই কোয়ালিটি জেপিজি সেভ
         cv2.imwrite(thumbnail_path, collage, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
         
-        # মেমোরি ক্লিয়ার
         del frames
         del collage
         gc.collect()
@@ -251,7 +255,7 @@ def generate_collage_thumbnail(video_path, message_id):
         return None
 
 # ====================================================================
-#                       ৫. অ্যাডমিন কমান্ডস (সম্পূর্ণ)
+#                       ৫. অ্যাডমিন কমান্ডস (সম্পূর্ণ বিস্তারিত)
 # ====================================================================
 
 @app.on_message(filters.command("start"))
@@ -556,7 +560,7 @@ async def processing_engine():
                     logger.info("⬇️ Downloading video for thumbnail generation...")
                     await app.download_media(source_msg, file_name=video_path)
                     
-                    # ৪. কোলাজ থাম্বনেইল তৈরি (Update: asyncio.to_thread ব্যবহার করা হয়েছে যাতে ব্লক না হয়)
+                    # ৪. কোলাজ থাম্বনেইল তৈরি (অরিজিনাল রেশিও বজায় রাখা হয়েছে)
                     logger.info("🎨 Generating Collage Thumbnail...")
                     thumb_path = await asyncio.to_thread(generate_collage_thumbnail, video_path, msg_id)
                     
@@ -591,7 +595,7 @@ async def processing_engine():
                             caption=final_caption,
                             reply_markup=buttons
                         )
-                        log_status = "✅ Posted with Collage Thumbnail"
+                        log_status = "✅ Posted with High-Quality Collage"
                     else:
                         # থাম্বনেইল ফেইল করলে শুধু মেসেজ
                         await app.send_message(
