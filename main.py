@@ -9,6 +9,7 @@ import numpy as np  # কোলাজ থাম্বনেইল বানা�
 import gc  # মেমোরি ক্লিয়ার করার জন্য
 import math
 import random
+import re  # লিংক এবং টেক্সট ক্লিন করার জন্য (নতুন)
 from datetime import datetime
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
@@ -66,6 +67,43 @@ SYSTEM_CONFIG = {
     "watermark_text": "@Enterprise_Bots", # স্মার্ট ফিচার: থাম্বনেইলে ওয়াটারমার্ক
     "caption_template": "🔥 **{title}** 🔥\n\n🎬 **Quality:** `{quality}`\n📦 **Size:** `{size}`\n👁 **Views:** `{views}`\n\n🚀 **Fastest Download Link**\n\n📢 *Join our channel for more exclusive content!*"
 }
+
+# ====================================================================
+#             🔥🔥 কাস্টম আকর্ষণীয় টাইটেল লিস্ট (NEW FEATURE) 🔥🔥
+# ====================================================================
+# বট এখান থেকে অটোমেটিক টাইটেল নিয়ে ভিডিও পোস্ট করবে। অন্যের লিংক আসবে না।
+ATTRACTIVE_TITLES = [
+    "🔥 New Viral Video 2026 🔞",
+    "✨ Exclusive Private Video Leaked 📹",
+    "💋 Hot Trending Video Just Arrived 🚀",
+    "🤐 Secret Video Do Not Miss 🤐",
+    "🔞 Full HD Uncensored Video 🎬",
+    "🛌 Bedroom Private Video Leaked 🗝️",
+    "💃 Desi Girl Viral Dance Video 💃",
+    "🛑 Strictly for Adults Only 18+ 🛑",
+    "🤫 College Girl Private MMS Leaked 🤫",
+    "💥 Just Now: New Hot Video Uploaded 💥",
+    "🚿 Bathroom Hidden Cam Video 🚿",
+    "💘 Lovers Private Moments Leaked 💘",
+    "🍑 Hot Bhabhi Romance Video 🍑",
+    "🌶️ Spicy Video Watch Before Delete 🌶️",
+    "🎥 Leaked: Famous Star Private Video 🎥",
+    "👅 Wild Romance Full HD Video 👅",
+    "👙 Bikini Girl Viral TikTok Video 👙",
+    "🍌 Hot & Sexy Video Collection 2026 🍌",
+    "🔦 Night Vision Hidden Camera Video 🔦",
+    "🛌 Hotel Room Secret Video Viral 🛌",
+    "🌧️ Rain Dance Hot Video Leaked 🌧️",
+    "🚌 Public Bus Romance Caught on Cam 🚌",
+    "👀 Viral Scandal Video 2026 👀",
+    "💣 Bomb Shell Hot Video 💣",
+    "📱 Girlfriend Private Video Leaked 📱",
+    "🔥 Most Wanted Viral Video 🔥",
+    "🚧 Warning: 18+ Content Inside 🚧",
+    "👅 Tongue Action Viral Video 👅",
+    "💃 Stage Dance Hot Performance 💃",
+    "🔞 Premium Leaked Content Free 🔞"
+]
 
 # এন্টি-স্প্যাম ট্র্যাকার (স্মার্ট ফিচার)
 user_last_request = {}
@@ -559,13 +597,22 @@ async def process_user_delivery(client, message):
             return await status_msg.edit("❌ **Error:** Video not found or deleted from server.")
         
         # স্মার্ট ফিচার: ভিউ ও হিস্ট্রি আপডেট
-        title = source_msg.caption or "Exclusive Video"
+        # এখানেও আমরা টাইটেল ক্লিন করে দিচ্ছি যাতে ইউজারকে পাঠানো ভিডিওতে লিংক না থাকে
+        raw_title = source_msg.caption or "Exclusive Video"
+        
+        # লিংক রিমুভ করা হচ্ছে
+        clean_user_title = re.sub(r'(https?://\S+|www\.\S+|t\.me/\S+|@\w+)', '', raw_title)
+        clean_user_title = re.sub(r'\s+', ' ', clean_user_title).strip()
+        
+        if len(clean_user_title) < 2:
+            clean_user_title = "Exclusive Video"
+
         await update_view_count(msg_id)
-        await add_user_history(message.from_user.id, msg_id, title)
+        await add_user_history(message.from_user.id, msg_id, clean_user_title)
 
         sent_msg = await source_msg.copy(
             chat_id=message.chat.id,
-            caption=f"✅ **Title:** `{title}`\n\n❌ **Do not forward this message.**",
+            caption=f"✅ **Title:** `{clean_user_title}`\n\n❌ **Do not forward this message.**",
             protect_content=SYSTEM_CONFIG["protect_content"]
         )
         
@@ -613,7 +660,7 @@ async def source_channel_listener(client, message):
                 await send_log_message(f"📥 **New Video Queued!**\nID: `{message.id}`")
 
 # ====================================================================
-#                       ৮. মেইন প্রসেসিং ইঞ্জিন (The Brain)
+#              ৮. মেইন প্রসেসিং ইঞ্জিন (UPDATED WITH RANDOM TITLES)
 # ====================================================================
 
 async def processing_engine():
@@ -671,12 +718,16 @@ async def processing_engine():
                     deep_link = f"https://t.me/{bot_username}?start={msg_id}"
                     final_link = await shorten_url_api(deep_link)
                     
-                    # ৬. স্মার্ট ক্যাপশন ফরম্যাটিং (Views সহ)
+                    # ==========================================
+                    # 🔥 টাইটেল রিপ্লেসমেন্ট লজিক (নতুন ফিচার) 🔥
+                    # ==========================================
                     views_count = await get_views(msg_id)
-                    raw_caption = task.get("caption", "New Video")[:100]
+                    
+                    # অন্যের ক্যাপশন ইগনোর করে আমাদের লিস্ট থেকে র‍্যান্ডম টাইটেল নেওয়া হচ্ছে
+                    new_spicy_title = random.choice(ATTRACTIVE_TITLES)
                     
                     final_caption = SYSTEM_CONFIG["caption_template"].format(
-                        title=raw_caption,
+                        title=new_spicy_title, # এখানে কাস্টম টাইটেল বসবে
                         quality=quality_label,
                         size=size_readable,
                         views=views_count
@@ -698,8 +749,8 @@ async def processing_engine():
                         await app.send_message(chat_id=dest_chat, text=final_caption, reply_markup=buttons)
                         log_status = "⚠️ Posted without Thumbnail"
                     
-                    logger.info(f"✅ Success: {msg_id}")
-                    await send_log_message(f"{log_status}\n🆔 Msg ID: `{msg_id}`")
+                    logger.info(f"✅ Success: {msg_id} | Title: {new_spicy_title}")
+                    await send_log_message(f"{log_status}\n🆔 Msg ID: `{msg_id}`\n🏷 Title: `{new_spicy_title}`")
                     
                 except Exception as e:
                     logger.error(f"❌ Processing Error: {e}")
@@ -743,5 +794,3 @@ async def main():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
-
-# --- END OF FILE ---
